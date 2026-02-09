@@ -1,111 +1,249 @@
-// homekeep-client/src/services/api.js
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5050/api/v1";
 
-const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:5050/api/v1";
-
-async function request(
-    path,
-    { method = "GET", token, body, isFormData = false, headers: extraHeaders = {} } = {}
-) {
-    const headers = { ...extraHeaders };
-
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    // Only set JSON headers when NOT sending FormData
-    if (!isFormData) headers["Content-Type"] = "application/json";
-
-    const res = await fetch(`${BASE_URL}${path}`, {
-        method,
-        headers,
-        body: body ? (isFormData ? body : JSON.stringify(body)) : undefined
-    });
-
-    // Some endpoints (like document streaming) won't be JSON; request() is for JSON endpoints only.
+async function request(path, options = {}) {
+    const res = await fetch(`${BASE_URL}${path}`, options);
     const data = await res.json().catch(() => ({}));
 
     if (!res.ok) {
-        throw new Error(data?.error?.message || "Request failed.");
+        throw new Error(data?.error?.message || "Request failed");
+    }
+    return data;
+}
+
+function authHeaders(token) {
+    return { Authorization: `Bearer ${token}` };
+}
+
+function jsonHeaders(token) {
+    return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+}
+
+/* ================= Auth ================= */
+
+async function login({ email, password }) {
+    const result = await request("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+    });
+
+    const token = result?.data?.token;
+    const user = result?.data?.user;
+    if (!token) throw new Error("Login did not return a token.");
+    return { user, token };
+}
+
+async function register({ name, email, password }) {
+    const result = await request("/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password }),
+    });
+
+    const token = result?.data?.token;
+    const user = result?.data?.user;
+    if (!token) throw new Error("Registration did not return a token.");
+    return { user, token };
+}
+
+async function me(token) {
+    return request("/users/me", { headers: authHeaders(token) });
+}
+
+/* ================= Dashboard ================= */
+
+async function dashboardSummary(token) {
+    return request("/dashboard/summary", { headers: authHeaders(token) });
+}
+
+async function getUpcomingReminders(days, token) {
+    return request(`/reminders/upcoming?days=${days}`, { headers: authHeaders(token) });
+}
+
+/* ================= Properties ================= */
+
+async function listProperties(token) {
+    return request("/properties", { headers: authHeaders(token) });
+}
+
+async function createProperty(payload, token) {
+    return request("/properties", {
+        method: "POST",
+        headers: jsonHeaders(token),
+        body: JSON.stringify(payload),
+    });
+}
+
+/* ================= Maintenance ================= */
+
+async function listMaintenance(propertyId, token) {
+    return request(`/properties/${propertyId}/maintenance`, { headers: authHeaders(token) });
+}
+
+async function createMaintenance(propertyId, payload, token) {
+    return request(`/properties/${propertyId}/maintenance`, {
+        method: "POST",
+        headers: jsonHeaders(token),
+        body: JSON.stringify(payload),
+    });
+}
+
+async function deleteMaintenanceLog(propertyId, logId, token) {
+    return request(`/properties/${propertyId}/maintenance/${logId}`, {
+        method: "DELETE",
+        headers: authHeaders(token),
+    });
+}
+
+/* ================= Maintenance Documents ================= */
+
+async function uploadMaintenanceDocument(propertyId, logId, file, token) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch(`${BASE_URL}/properties/${propertyId}/maintenance/${logId}/documents`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error?.message || "Upload failed");
+    return data;
+}
+
+async function listMaintenanceDocuments(propertyId, logId, token) {
+    return request(`/properties/${propertyId}/maintenance/${logId}/documents`, {
+        headers: authHeaders(token),
+    });
+}
+
+async function downloadMaintenanceDocument(propertyId, logId, documentId, token) {
+    const res = await fetch(
+        `${BASE_URL}/properties/${propertyId}/maintenance/${logId}/documents/${documentId}/download`,
+        {
+            method: "GET",
+            headers: authHeaders(token),
+        }
+    );
+
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error?.message || "Download failed");
     }
 
+    const contentDisposition = res.headers.get("content-disposition") || "";
+    const match = contentDisposition.match(/filename="(.+?)"/i);
+    const filename = match?.[1] || "document";
+
+    const blob = await res.blob();
+    return { blob, filename };
+}
+
+async function deleteMaintenanceDocument(propertyId, logId, documentId, token) {
+    return request(`/properties/${propertyId}/maintenance/${logId}/documents/${documentId}`, {
+        method: "DELETE",
+        headers: authHeaders(token),
+    });
+}
+
+/* ================= Receipts (Upload + Scan Flow) ================= */
+
+/**
+ * Upload an unattached receipt and return extracted fields.
+ * POST /api/v1/documents/receipts
+ */
+async function uploadReceipt(file, token) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch(`${BASE_URL}/documents/receipts`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error?.message || "Receipt upload failed");
     return data;
 }
 
 /**
- * Fetch a protected file as a Blob (so we can open/download it while sending the JWT).
+ * Attach an unattached receipt to a maintenance log.
+ * POST /api/v1/documents/receipts/:documentId/attach
  */
-async function fetchBlob(url, token) {
-    const res = await fetch(url, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+async function attachReceipt(documentId, propertyId, logId, token) {
+    return request(`/documents/receipts/${documentId}/attach`, {
+        method: "POST",
+        headers: jsonHeaders(token),
+        body: JSON.stringify({ propertyId, logId }),
+    });
+}
+
+/**
+ * Download/view a receipt blob.
+ * GET /api/v1/documents/receipts/:documentId
+ */
+async function getReceiptBlob(documentId, token) {
+    const res = await fetch(`${BASE_URL}/documents/receipts/${documentId}`, {
+        method: "GET",
+        headers: authHeaders(token),
     });
 
     if (!res.ok) {
-        let msg = "Failed to fetch file.";
-        try {
-            const data = await res.json();
-            msg = data?.error?.message || msg;
-        } catch {
-            // ignore
-        }
-        throw new Error(msg);
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error?.message || "Receipt download failed");
     }
 
+    const contentDisposition = res.headers.get("content-disposition") || "";
+    const match = contentDisposition.match(/filename="(.+?)"/i);
+    const filename = match?.[1] || "receipt";
+
     const blob = await res.blob();
-    const contentType = res.headers.get("content-type") || "";
-    return { blob, contentType };
+    return { blob, filename };
 }
 
+/**
+ * Cleanup/delete an unattached receipt.
+ * DELETE /api/v1/documents/receipts/:documentId
+ */
+async function deleteReceipt(documentId, token) {
+    return request(`/documents/receipts/${documentId}`, {
+        method: "DELETE",
+        headers: authHeaders(token),
+    });
+}
+
+/* ================= Export ================= */
+
 export const api = {
-    // ---- Health / Dashboard ----
-    health: () => request("/health"),
-    dashboardSummary: (token) => request("/dashboard/summary", { token }),
+    // auth
+    login,
+    register,
+    me,
 
-    // ---- Auth ----
-    register: (payload) => request("/auth/register", { method: "POST", body: payload }),
-    login: (payload) => request("/auth/login", { method: "POST", body: payload }),
+    // dashboard
+    dashboardSummary,
+    getUpcomingReminders,
 
-    // ---- Users ----
-    me: (token) => request("/users/me", { token }),
+    // properties
+    listProperties,
+    createProperty,
 
-    // ---- Properties ----
-    listProperties: (token) => request("/properties", { token }),
-    createProperty: (payload, token) => request("/properties", { method: "POST", body: payload, token }),
+    // maintenance
+    listMaintenance,
+    createMaintenance,
+    deleteMaintenanceLog,
 
-    // ---- Maintenance ----
-    listMaintenance: (propertyId, token) =>
-        request(`/properties/${propertyId}/maintenance`, { token }),
+    // maintenance documents
+    uploadMaintenanceDocument,
+    listMaintenanceDocuments,
+    downloadMaintenanceDocument,
+    deleteMaintenanceDocument,
 
-    createMaintenance: (propertyId, payload, token) =>
-        request(`/properties/${propertyId}/maintenance`, { method: "POST", body: payload, token }),
-
-    // ---- Documents (Week 3) ----
-    listMaintenanceDocuments: (propertyId, logId, token) =>
-        request(`/properties/${propertyId}/maintenance/${logId}/documents`, { token }),
-
-    uploadMaintenanceDocument: (propertyId, logId, file, token) => {
-        const form = new FormData();
-        form.append("file", file);
-
-        return request(`/properties/${propertyId}/maintenance/${logId}/documents`, {
-            method: "POST",
-            token,
-            body: form,
-            isFormData: true
-        });
-    },
-
-    // Returns the protected URL (requires JWT)
-    documentUrl: (documentId) => `${BASE_URL}/documents/${documentId}`,
-
-    // Fetches the document with JWT and returns a Blob we can open in the browser
-    fetchDocumentBlob: (documentId, token) => fetchBlob(`${BASE_URL}/documents/${documentId}`, token),
-
-    getUpcomingReminders: (days, token) =>
-        request(`/reminders/upcoming?days=${days}`, { token }),
-
-    updateMaintenance: (propertyId, logId, payload, token) =>
-        request(`/properties/${propertyId}/maintenance/${logId}`, {
-            method: "PATCH",
-            body: payload,
-            token
-        })
-
+    // receipts flow
+    uploadReceipt,
+    attachReceipt,
+    getReceiptBlob,
+    deleteReceipt,
 };

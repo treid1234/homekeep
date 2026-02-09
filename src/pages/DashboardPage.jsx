@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext.jsx";
 import { Link } from "react-router-dom";
+import EmptyState from "../components/EmptyState.jsx";
 
 export default function DashboardPage() {
     const { token } = useAuth();
@@ -13,29 +14,33 @@ export default function DashboardPage() {
     const [upcoming, setUpcoming] = useState([]);
     const [overdue, setOverdue] = useState([]);
 
+    function unwrap(res) {
+        const body = res?.data ? res.data : res; // supports fetch wrapper or axios-like
+        if (!body) return null;
+        if (typeof body === "object" && body.data && typeof body.data === "object") return body.data;
+        return body;
+    }
+
     async function load() {
         setLoading(true);
         setError("");
 
         try {
-            const [summaryRes, remindersRes] = await Promise.all([
-                api.dashboardSummary(token),
-                api.getUpcomingReminders(30, token),
-            ]);
-
-            const unwrap = (res) => {
-                const body = res?.data;
-                if (!body) return null;
-                if (typeof body === "object" && body.data && typeof body.data === "object") return body.data;
-                return body;
-            };
-
+            // Load summary first (critical)
+            const summaryRes = await api.dashboardSummary(token);
             const summaryPayload = unwrap(summaryRes);
-            const remindersPayload = unwrap(remindersRes) || {};
-
             setSummary(summaryPayload);
-            setUpcoming(remindersPayload.upcoming || []);
-            setOverdue(remindersPayload.overdue || []);
+
+            // Reminders are optional (don’t break dashboard)
+            try {
+                const remindersRes = await api.getUpcomingReminders(30, token);
+                const remindersPayload = unwrap(remindersRes) || {};
+                setUpcoming(remindersPayload.upcoming || []);
+                setOverdue(remindersPayload.overdue || []);
+            } catch {
+                setUpcoming([]);
+                setOverdue([]);
+            }
         } catch (err) {
             setError(err.message || "Failed to load dashboard.");
         } finally {
@@ -53,109 +58,99 @@ export default function DashboardPage() {
         return arr.map((d) => Number(d.total) || 0);
     }, [summary]);
 
-    if (loading) return <div>Loading dashboard…</div>;
-    if (error) return <div style={{ color: "crimson" }}>{error}</div>;
-
     const monthSpend = summary?.totals?.month;
     const yearSpend = summary?.totals?.year;
     const recentLogs = summary?.recentLogs || [];
 
-    return (
-        <div>
-            <h2>Dashboard</h2>
+    if (loading) return <div className="hk-container">Loading dashboard…</div>;
+    if (error) return <div className="hk-container hk-error">{error}</div>;
 
-            {/* ===== Summary Cards ===== */}
-            <div
-                style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                    gap: 16,
-                    marginBottom: 24,
-                }}
-            >
-                <SummaryCard label="This Month" value={formatMoney(monthSpend)} />
-                <SummaryCard label="This Year" value={formatMoney(yearSpend)} />
-                <SummaryCard
-                    label="Recent Activity"
-                    value={`${recentLogs.length} log${recentLogs.length === 1 ? "" : "s"}`}
-                />
-                <div
-                    style={{
-                        padding: 16,
-                        border: "1px solid #e5e7eb",
-                        borderRadius: 10,
-                        background: "#fff",
-                    }}
-                >
-                    <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 10 }}>Last 30 days spend</div>
-                    <Sparkline values={sparkValues} />
-                    <div style={{ marginTop: 10, fontSize: 14, color: "#374151" }}>
-                        Total: {formatMoney(sparkValues.reduce((a, b) => a + b, 0))}
+    return (
+        <div className="hk-container">
+            <div className="hk-header">
+                <div>
+                    <h2 className="hk-title">Dashboard</h2>
+                    <p className="hk-subtitle">A snapshot of spend + recent activity.</p>
+                </div>
+                <button className="hk-btn hk-btn-ghost" type="button" onClick={load}>
+                    Refresh
+                </button>
+            </div>
+
+            <div className="hk-grid">
+                <StatCard label="This Month" value={formatMoney(monthSpend)} />
+                <StatCard label="This Year" value={formatMoney(yearSpend)} />
+                <StatCard label="Recent Logs" value={`${recentLogs.length}`} />
+                <div className="hk-card hk-card-pad">
+                    <div className="hk-row">
+                        <div>
+                            <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>Last 30 Days Trend</div>
+                            <div style={{ fontSize: 22, fontWeight: 900 }}>{formatMoney(sparkValues.reduce((a, b) => a + b, 0))}</div>
+                        </div>
+                        <span className="hk-pill">Trend</span>
                     </div>
+                    <div className="hk-divider" />
+                    <Sparkline values={sparkValues} />
                 </div>
             </div>
 
-            {/* ===== Recent Logs ===== */}
-            <section
-                style={{
-                    padding: 16,
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 10,
-                    background: "#fff",
-                    marginBottom: 24,
-                }}
-            >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                    <h3 style={{ marginTop: 0, marginBottom: 0 }}>Recent Logs</h3>
-                    <button onClick={load} style={{ cursor: "pointer" }}>Refresh</button>
+            <section className="hk-card hk-card-pad">
+                <div className="hk-row">
+                    <h3 className="hk-section-title">Recent Logs</h3>
+                    <span className="hk-pill">Latest 5</span>
                 </div>
 
                 {recentLogs.length === 0 ? (
-                    <div style={{ color: "#374151", marginTop: 10 }}>No maintenance logs yet.</div>
+                    <EmptyState
+                        variant="dashboard"
+                        title="No maintenance logs yet"
+                        message="Create your first maintenance entry from a property, then you’ll see recent activity here."
+                    />
                 ) : (
-                    <ul style={{ paddingLeft: 18, marginTop: 12, marginBottom: 0 }}>
+                    <ul className="hk-list" style={{ marginTop: 10 }}>
                         {recentLogs.slice(0, 5).map((log) => (
-                            <li key={log._id} style={{ marginBottom: 10 }}>
-                                <div style={{ fontWeight: 700 }}>{log.title}</div>
-                                <div style={{ fontSize: 13, color: "#374151" }}>
+                            <li key={log._id} style={{ padding: 12, border: "1px solid var(--border)", borderRadius: 12, marginBottom: 10, background: "var(--surface)" }}>
+                                <div style={{ fontWeight: 900 }}>{log.title}</div>
+                                <div className="hk-muted" style={{ fontSize: 13, marginTop: 4 }}>
                                     {log.property?.nickname ? `${log.property.nickname} — ` : ""}
-                                    {log.serviceDate ? new Date(log.serviceDate).toLocaleDateString() : "No service date"}
+                                    {log.serviceDate ? new Date(log.serviceDate).toLocaleDateString() : "No date"}
                                     {typeof log.cost === "number" ? ` • ${formatMoney(log.cost)}` : ""}
                                 </div>
-                                <Link to={`/properties/${log.property?._id || log.property}/maintenance`} style={{ fontSize: 13 }}>
-                                    View maintenance
-                                </Link>
+                                <div style={{ marginTop: 8 }}>
+                                    <Link className="hk-link" to={`/properties/${log.property?._id || log.property}/maintenance`}>
+                                        View maintenance →
+                                    </Link>
+                                </div>
                             </li>
                         ))}
                     </ul>
                 )}
             </section>
 
-            {/* ===== Reminders Section ===== */}
-            <section
-                style={{
-                    padding: 16,
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 10,
-                    background: "#fff",
-                }}
-            >
-                <h3 style={{ marginTop: 0 }}>Upcoming Maintenance</h3>
+            <section className="hk-card hk-card-pad">
+                <div className="hk-row">
+                    <h3 className="hk-section-title">Upcoming Maintenance</h3>
+                    <span className="hk-pill">Next 30 days</span>
+                </div>
 
                 {overdue.length === 0 && upcoming.length === 0 ? (
-                    <div style={{ color: "#374151" }}>No upcoming or overdue maintenance in the next 30 days 🎉</div>
+                    <EmptyState
+                        variant="default"
+                        title="Nothing due soon 🎉"
+                        message="Add a Next due date on a maintenance log and enable reminders to see items show up here."
+                    />
                 ) : (
-                    <div style={{ display: "grid", gap: 16 }}>
+                    <div style={{ display: "grid", gap: 16, marginTop: 10 }}>
                         {overdue.length > 0 && (
                             <div>
-                                <div style={{ fontWeight: 700, color: "#b91c1c", marginBottom: 6 }}>Overdue</div>
+                                <div className="hk-pill hk-badge-danger" style={{ marginBottom: 10 }}>Overdue</div>
                                 <ReminderList items={overdue} />
                             </div>
                         )}
 
                         {upcoming.length > 0 && (
                             <div>
-                                <div style={{ fontWeight: 700, color: "#92400e", marginBottom: 6 }}>Due Soon</div>
+                                <div className="hk-pill hk-badge-warn" style={{ marginBottom: 10 }}>Due Soon</div>
                                 <ReminderList items={upcoming} />
                             </div>
                         )}
@@ -166,7 +161,32 @@ export default function DashboardPage() {
     );
 }
 
-/* ================= Helpers ================= */
+function StatCard({ label, value }) {
+    return (
+        <div className="hk-card hk-card-pad">
+            <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>{label}</div>
+            <div style={{ fontSize: 22, fontWeight: 900, marginTop: 6 }}>{value}</div>
+        </div>
+    );
+}
+
+function ReminderList({ items }) {
+    return (
+        <ul className="hk-list">
+            {items.map((log) => (
+                <li key={log._id} style={{ padding: 12, border: "1px solid var(--border)", borderRadius: 12, marginBottom: 10, background: "var(--surface)" }}>
+                    <div style={{ fontWeight: 900 }}>{log.title}</div>
+                    <div className="hk-muted" style={{ fontSize: 13, marginTop: 4 }}>
+                        Due {log.nextDueDate ? new Date(log.nextDueDate).toLocaleDateString() : "—"}
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                        <Link className="hk-link" to={`/properties/${log.property}/maintenance`}>View maintenance →</Link>
+                    </div>
+                </li>
+            ))}
+        </ul>
+    );
+}
 
 function formatMoney(value) {
     const n = typeof value === "number" ? value : Number(value);
@@ -174,50 +194,19 @@ function formatMoney(value) {
     return `$${n.toFixed(2)}`;
 }
 
-function SummaryCard({ label, value }) {
-    return (
-        <div style={{ padding: 16, border: "1px solid #e5e7eb", borderRadius: 10, background: "#fff" }}>
-            <div style={{ fontSize: 13, opacity: 0.7 }}>{label}</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{value}</div>
-        </div>
-    );
-}
-
-function ReminderList({ items }) {
-    return (
-        <ul style={{ paddingLeft: 18, margin: 0 }}>
-            {items.map((log) => (
-                <li key={log._id} style={{ marginBottom: 8 }}>
-                    <div style={{ fontWeight: 600 }}>{log.title}</div>
-                    <div style={{ fontSize: 13, color: "#374151" }}>
-                        Due {log.nextDueDate ? new Date(log.nextDueDate).toLocaleDateString() : "—"}
-                    </div>
-
-                    <Link to={`/properties/${log.property}/maintenance`} style={{ fontSize: 13 }}>
-                        View maintenance
-                    </Link>
-                </li>
-            ))}
-        </ul>
-    );
-}
-
-/**
- * Tiny dependency-free sparkline.
- * values: number[]
- */
 function Sparkline({ values }) {
-    const w = 220;
-    const h = 50;
-    const pad = 4;
+    const w = 260;
+    const h = 64;
+    const pad = 6;
 
-    const max = Math.max(...values, 0);
-    const min = Math.min(...values, 0);
+    const safe = Array.isArray(values) && values.length ? values : [0];
+    const max = Math.max(...safe, 0);
+    const min = Math.min(...safe, 0);
     const range = max - min || 1;
 
-    const points = values
+    const points = safe
         .map((v, i) => {
-            const x = pad + (i * (w - pad * 2)) / Math.max(values.length - 1, 1);
+            const x = pad + (i * (w - pad * 2)) / Math.max(safe.length - 1, 1);
             const y = h - pad - ((v - min) * (h - pad * 2)) / range;
             return `${x},${y}`;
         })
@@ -225,7 +214,7 @@ function Sparkline({ values }) {
 
     return (
         <svg width="100%" viewBox={`0 0 ${w} ${h}`} role="img" aria-label="Spend sparkline">
-            <polyline fill="none" stroke="currentColor" strokeWidth="2" points={points} />
+            <polyline fill="none" stroke="currentColor" strokeWidth="3" strokeOpacity="0.85" points={points} />
         </svg>
     );
 }

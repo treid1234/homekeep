@@ -14,11 +14,14 @@ export function AuthProvider({ children }) {
             setLoading(false);
             return;
         }
+
         try {
             const res = await api.me(currentToken);
-            setUser(res.data.user);
-        } catch (err) {
-            // token invalid/expired: wipe it
+            // api.me returns { success, data: { user } }
+            const payload = res?.data ? res.data : res;
+            const data = payload?.data ? payload.data : payload;
+            setUser(data?.user || null);
+        } catch {
             localStorage.removeItem("homekeep_token");
             setToken("");
             setUser(null);
@@ -33,23 +36,23 @@ export function AuthProvider({ children }) {
     }, []);
 
     async function login(email, password) {
-        const res = await api.login({ email, password });
-        const newToken = res.data.token;
+        const { user, token: newToken } = await api.login({ email, password });
 
         localStorage.setItem("homekeep_token", newToken);
         setToken(newToken);
-        setUser(res.data.user);
+        setUser(user);
     }
 
+    // REGISTER
     async function register(name, email, password) {
-        const res = await api.register({ name, email, password });
-        const newToken = res.data.token;
+        const { user, token: newToken } = await api.register({ name, email, password });
 
         localStorage.setItem("homekeep_token", newToken);
         setToken(newToken);
-        setUser(res.data.user);
+        setUser(user);
     }
 
+    // LOGOUT
     function logout() {
         localStorage.removeItem("homekeep_token");
         setToken("");

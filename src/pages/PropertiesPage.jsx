@@ -18,7 +18,7 @@ export default function PropertiesPage() {
         province: "BC",
         postalCode: "",
         purchaseDate: "",
-        notes: ""
+        notes: "",
     });
 
     const [submitting, setSubmitting] = useState(false);
@@ -27,11 +27,17 @@ export default function PropertiesPage() {
     async function load() {
         setLoading(true);
         setPageError("");
+
         try {
             const res = await api.listProperties(token);
-            setProperties(res.data.properties || []);
+            const props =
+                res?.data?.properties ||
+                res?.data?.data?.properties ||
+                res?.data?.data?.data?.properties ||
+                [];
+            setProperties(props);
         } catch (err) {
-            setPageError(err.message);
+            setPageError(err.message || "Failed to load properties.");
         } finally {
             setLoading(false);
         }
@@ -39,7 +45,6 @@ export default function PropertiesPage() {
 
     useEffect(() => {
         load();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     function updateField(key, value) {
@@ -50,17 +55,23 @@ export default function PropertiesPage() {
         e.preventDefault();
         setFormError("");
 
-        if (!form.nickname.trim() || !form.addressLine1.trim() || !form.city.trim() || !form.province.trim()) {
+        if (
+            !form.nickname.trim() ||
+            !form.addressLine1.trim() ||
+            !form.city.trim() ||
+            !form.province.trim()
+        ) {
             setFormError("Nickname, address line 1, city, and province are required.");
             return;
         }
 
         setSubmitting(true);
+
         try {
             await api.createProperty(
                 {
                     ...form,
-                    purchaseDate: form.purchaseDate ? form.purchaseDate : null
+                    purchaseDate: form.purchaseDate ? form.purchaseDate : null,
                 },
                 token
             );
@@ -70,143 +81,176 @@ export default function PropertiesPage() {
                 addressLine1: "",
                 addressLine2: "",
                 postalCode: "",
-                notes: ""
+                notes: "",
             }));
 
             await load();
         } catch (err) {
-            setFormError(err.message);
+            setFormError(err.message || "Failed to save property.");
         } finally {
             setSubmitting(false);
         }
     }
 
     return (
-        <div>
-            <h2>Properties</h2>
+        <div className="hk-container">
+            <div className="hk-header">
+                <div>
+                    <h2 className="hk-title">Properties</h2>
+                    <p className="hk-subtitle">
+                        Add and manage your properties. Each property can have its own
+                        maintenance logs and documents.
+                    </p>
+                </div>
+                <span className="hk-pill">HomeKeep</span>
+            </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
-                <section style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-                    <h3 style={{ marginTop: 0 }}>Add a property</h3>
+            <div className="hk-split">
+                {/* Left: Add property */}
+                <section className="hk-card hk-card-pad">
+                    <div className="hk-row" style={{ marginBottom: 10 }}>
+                        <h3 className="hk-section-title">Add a property</h3>
+                        <span className="hk-pill">Required *</span>
+                    </div>
 
-                    <form onSubmit={handleSubmit} style={{ display: "grid", gap: 10 }}>
-                        <label>
+                    <form onSubmit={handleSubmit} className="hk-form">
+                        <label className="hk-label">
                             Nickname *
                             <input
+                                className="hk-input"
                                 value={form.nickname}
                                 onChange={(e) => updateField("nickname", e.target.value)}
-                                style={{ width: "100%" }}
+                                placeholder="e.g., Princeton House"
                             />
                         </label>
 
-                        <label>
+                        <label className="hk-label">
                             Address line 1 *
                             <input
+                                className="hk-input"
                                 value={form.addressLine1}
                                 onChange={(e) => updateField("addressLine1", e.target.value)}
-                                style={{ width: "100%" }}
+                                placeholder="e.g., 297 Lachine Avenue"
                             />
                         </label>
 
-                        <label>
+                        <label className="hk-label">
                             Address line 2
                             <input
+                                className="hk-input"
                                 value={form.addressLine2}
                                 onChange={(e) => updateField("addressLine2", e.target.value)}
-                                style={{ width: "100%" }}
+                                placeholder="Suite / Unit (optional)"
                             />
                         </label>
 
-                        <label>
-                            City *
-                            <input
-                                value={form.city}
-                                onChange={(e) => updateField("city", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
+                        <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                            <label className="hk-label">
+                                City *
+                                <input
+                                    className="hk-input"
+                                    value={form.city}
+                                    onChange={(e) => updateField("city", e.target.value)}
+                                />
+                            </label>
 
-                        <label>
-                            Province *
-                            <input
-                                value={form.province}
-                                onChange={(e) => updateField("province", e.target.value)}
-                                style={{ width: "100%" }}
-                            />
-                        </label>
+                            <label className="hk-label">
+                                Province *
+                                <input
+                                    className="hk-input"
+                                    value={form.province}
+                                    onChange={(e) => updateField("province", e.target.value)}
+                                />
+                            </label>
+                        </div>
 
-                        <label>
+                        <label className="hk-label">
                             Postal code
                             <input
+                                className="hk-input"
                                 value={form.postalCode}
                                 onChange={(e) => updateField("postalCode", e.target.value)}
-                                style={{ width: "100%" }}
+                                placeholder="e.g., V0X 1W0"
                             />
                         </label>
 
-                        <label>
+                        <label className="hk-label">
                             Purchase date
                             <input
+                                className="hk-input"
                                 type="date"
                                 value={form.purchaseDate}
                                 onChange={(e) => updateField("purchaseDate", e.target.value)}
-                                style={{ width: "100%" }}
                             />
                         </label>
 
-                        <label>
+                        <label className="hk-label">
                             Notes
                             <textarea
+                                className="hk-textarea"
                                 value={form.notes}
                                 onChange={(e) => updateField("notes", e.target.value)}
                                 rows={3}
-                                style={{ width: "100%" }}
+                                placeholder="Anything you want to remember…"
                             />
                         </label>
 
-                        {formError && <div style={{ color: "crimson" }}>{formError}</div>}
+                        {formError && <div className="hk-error">{formError}</div>}
 
-                        <button disabled={submitting} type="submit">
-                            {submitting ? "Saving..." : "Save property"}
-                        </button>
+                        <div className="hk-actions">
+                            <button className="hk-btn" disabled={submitting} type="submit">
+                                {submitting ? "Saving…" : "Save property"}
+                            </button>
+                            <span className="hk-muted" style={{ fontSize: 13 }}>
+                                You can add maintenance logs after saving.
+                            </span>
+                        </div>
                     </form>
                 </section>
 
-                <section style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                        <h3 style={{ marginTop: 0 }}>Your properties</h3>
-                        <button onClick={load} disabled={loading}>
+                {/* Right: Your properties */}
+                <section className="hk-card hk-card-pad">
+                    <div className="hk-row" style={{ marginBottom: 10 }}>
+                        <h3 className="hk-section-title">Your properties</h3>
+                        <button className="hk-btn" onClick={load} disabled={loading}>
                             Refresh
                         </button>
                     </div>
 
-                    {pageError && <div style={{ color: "crimson" }}>{pageError}</div>}
+                    {pageError && <div className="hk-error">{pageError}</div>}
 
                     {loading ? (
-                        <div>Loading...</div>
+                        <div className="hk-muted">Loading…</div>
                     ) : properties.length === 0 ? (
-                        <div>No properties yet. Add your first one.</div>
+                        <div className="hk-muted">No properties yet. Add your first one.</div>
                     ) : (
-                        <ul style={{ paddingLeft: 18 }}>
+                        <ul className="hk-list" style={{ marginTop: 10 }}>
                             {properties.map((p) => (
-                                <li key={p._id} style={{ marginBottom: 10 }}>
-                                    <div style={{ fontWeight: 600 }}>{p.nickname}</div>
+                                <li key={p._id} style={{ marginBottom: 14 }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                                        <div>
+                                            <div style={{ fontWeight: 900 }}>{p.nickname}</div>
+                                            <div className="hk-muted" style={{ fontSize: 13 }}>
+                                                {p.addressLine1}
+                                                {p.addressLine2 ? `, ${p.addressLine2}` : ""}, {p.city}, {p.province}{" "}
+                                                {p.postalCode ? p.postalCode : ""}
+                                            </div>
 
-                                    <div style={{ fontSize: 14 }}>
-                                        {p.addressLine1}
-                                        {p.addressLine2 ? `, ${p.addressLine2}` : ""}, {p.city}, {p.province}{" "}
-                                        {p.postalCode ? p.postalCode : ""}
-                                    </div>
-
-                                    <div style={{ marginTop: 6 }}>
-                                        <Link to={`/properties/${p._id}/maintenance`}>View maintenance</Link>
-                                    </div>
-
-                                    {p.purchaseDate && (
-                                        <div style={{ fontSize: 13, opacity: 0.8 }}>
-                                            Purchased: {new Date(p.purchaseDate).toLocaleDateString()}
+                                            {p.purchaseDate && (
+                                                <div className="hk-muted" style={{ fontSize: 13 }}>
+                                                    Purchased: {new Date(p.purchaseDate).toLocaleDateString()}
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
+
+                                        <div style={{ display: "flex", alignItems: "center" }}>
+                                            <Link className="hk-link" to={`/properties/${p._id}/maintenance`}>
+                                                View maintenance →
+                                            </Link>
+                                        </div>
+                                    </div>
+
+                                    <div className="hk-divider" />
                                 </li>
                             ))}
                         </ul>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 
 export default function LoginPage() {
@@ -8,53 +8,80 @@ export default function LoginPage() {
 
     const [email, setEmail] = useState("tamara@test.com");
     const [password, setPassword] = useState("Password123!");
+    const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
-    const [submitting, setSubmitting] = useState(false);
 
     async function handleSubmit(e) {
         e.preventDefault();
         setError("");
-        setSubmitting(true);
+
+        const trimmedEmail = email.trim();
+
+        if (!trimmedEmail || !password) {
+            setError("Email and password are required.");
+            return;
+        }
+
+        setLoading(true);
         try {
-            await login(email.trim(), password);
+            await login(trimmedEmail, password);
             navigate("/dashboard");
         } catch (err) {
-            setError(err.message);
+            setError(err.message || "Login failed.");
         } finally {
-            setSubmitting(false);
+            setLoading(false);
         }
     }
 
     return (
-        <div style={{ maxWidth: 420 }}>
-            <h2>Login</h2>
+        <div className="hk-container">
+            <div className="hk-header">
+                <div>
+                    <h2 className="hk-title">Log in</h2>
+                    <p className="hk-subtitle">Welcome back 👋</p>
+                </div>
+                <span className="hk-pill">HomeKeep</span>
+            </div>
 
-            <form onSubmit={handleSubmit} style={{ display: "grid", gap: 10 }}>
-                <label>
-                    Email
-                    <input value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: "100%" }} />
-                </label>
+            <section className="hk-card hk-card-pad" style={{ maxWidth: 520, margin: "0 auto" }}>
+                <form onSubmit={handleSubmit} className="hk-form">
+                    <label className="hk-label">
+                        Email
+                        <input
+                            className="hk-input"
+                            type="email"
+                            autoComplete="email"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            placeholder="you@example.com"
+                        />
+                    </label>
 
-                <label>
-                    Password
-                    <input
-                        value={password}
-                        type="password"
-                        onChange={(e) => setPassword(e.target.value)}
-                        style={{ width: "100%" }}
-                    />
-                </label>
+                    <label className="hk-label">
+                        Password
+                        <input
+                            className="hk-input"
+                            type="password"
+                            autoComplete="current-password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="••••••••"
+                        />
+                    </label>
 
-                {error && <div style={{ color: "crimson" }}>{error}</div>}
+                    {error && <div className="hk-error">{error}</div>}
 
-                <button disabled={submitting} type="submit">
-                    {submitting ? "Logging in..." : "Login"}
-                </button>
-            </form>
+                    <div className="hk-actions" style={{ justifyContent: "space-between" }}>
+                        <button className="hk-btn" type="submit" disabled={loading}>
+                            {loading ? "Logging in…" : "Log in"}
+                        </button>
 
-            <p style={{ marginTop: 12 }}>
-                Don’t have an account? <Link to="/register">Register</Link>
-            </p>
+                        <Link className="hk-link" to="/register">
+                            Need an account?
+                        </Link>
+                    </div>
+                </form>
+            </section>
         </div>
     );
 }
