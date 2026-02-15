@@ -1,67 +1,37 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { api } from "../services/api";
+import { createContext, useContext, useMemo, useState } from "react";
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-    const [token, setToken] = useState(() => localStorage.getItem("homekeep_token") || "");
-    const [user, setUser] = useState(null);
-    const [loading, setLoading] = useState(true);
-
-    async function loadMe(currentToken) {
-        if (!currentToken) {
-            setUser(null);
-            setLoading(false);
-            return;
-        }
-
+    const [token, setToken] = useState(() => localStorage.getItem("hk_token") || "");
+    const [user, setUser] = useState(() => {
+        const raw = localStorage.getItem("hk_user");
         try {
-            const res = await api.me(currentToken);
-            // api.me returns { success, data: { user } }
-            const payload = res?.data ? res.data : res;
-            const data = payload?.data ? payload.data : payload;
-            setUser(data?.user || null);
+            return raw ? JSON.parse(raw) : null;
         } catch {
-            localStorage.removeItem("homekeep_token");
-            setToken("");
-            setUser(null);
-        } finally {
-            setLoading(false);
+            return null;
         }
+    });
+
+    function setSession({ user: nextUser, token: nextToken }) {
+        const t = nextToken || "";
+        setToken(t);
+        setUser(nextUser || null);
+
+        if (t) localStorage.setItem("hk_token", t);
+        else localStorage.removeItem("hk_token");
+
+        if (nextUser) localStorage.setItem("hk_user", JSON.stringify(nextUser));
+        else localStorage.removeItem("hk_user");
     }
 
-    useEffect(() => {
-        loadMe(token);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
-
-    async function login(email, password) {
-        const { user, token: newToken } = await api.login({ email, password });
-
-        localStorage.setItem("homekeep_token", newToken);
-        setToken(newToken);
-        setUser(user);
-    }
-
-    // REGISTER
-    async function register(name, email, password) {
-        const { user, token: newToken } = await api.register({ name, email, password });
-
-        localStorage.setItem("homekeep_token", newToken);
-        setToken(newToken);
-        setUser(user);
-    }
-
-    // LOGOUT
     function logout() {
-        localStorage.removeItem("homekeep_token");
-        setToken("");
-        setUser(null);
+        setSession({ user: null, token: "" });
     }
 
     const value = useMemo(
-        () => ({ token, user, loading, login, register, logout }),
-        [token, user, loading]
+        () => ({ token, user, setSession, logout }),
+        [token, user]
     );
 
     return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -69,6 +39,6 @@ export function AuthProvider({ children }) {
 
 export function useAuth() {
     const ctx = useContext(AuthContext);
-    if (!ctx) throw new Error("useAuth must be used inside AuthProvider");
+    if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
     return ctx;
 }

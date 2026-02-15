@@ -1,20 +1,206 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext.jsx";
+
+function money(n) {
+    const num = typeof n === "number" && Number.isFinite(n) ? n : 0;
+    return num.toLocaleString(undefined, { style: "currency", currency: "CAD" });
+}
+
+function safeDateLabel(d) {
+    if (!d) return "";
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return "";
+    return dt.toLocaleDateString();
+}
+
+function safeTimeLabel(d) {
+    if (!d) return "";
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return "";
+    return dt.toLocaleString();
+}
+
+// HTML <input type="date"> requires YYYY-MM-DD
+function toDateInputValue(dateLike) {
+    if (!dateLike) return "";
+    const d = new Date(dateLike);
+    if (Number.isNaN(d.getTime())) return "";
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+}
+
+// Send ISO midnight UTC to avoid timezone drift
+function fromDateInputValue(v) {
+    if (!v) return null;
+    return new Date(`${v}T00:00:00.000Z`).toISOString();
+}
+
+function clampStr(v, max = 220) {
+    const s = typeof v === "string" ? v : "";
+    if (!s) return "";
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function Modal({ open, title, children, onClose }) {
+    if (!open) return null;
+
+    return (
+        <div
+            role="dialog"
+            aria-modal="true"
+            onClick={onClose}
+            style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.55)",
+                display: "grid",
+                placeItems: "center",
+                padding: 16,
+                zIndex: 9999,
+            }}
+        >
+            <div
+                className="hk-card hk-card-pad"
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                    width: "min(980px, 96vw)",
+                    maxHeight: "86vh",
+                    overflow: "auto",
+                }}
+            >
+                <div className="hk-row" style={{ marginBottom: 12 }}>
+                    <div style={{ fontWeight: 900, fontSize: 16 }}>{title}</div>
+                    <button className="hk-btn" type="button" onClick={onClose}>
+                        ✕
+                    </button>
+                </div>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function Pill({ children }) {
+    return (
+        <span
+            className="hk-pill"
+            style={{
+                fontSize: 12,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+            }}
+        >
+            {children}
+        </span>
+    );
+}
+
+/**
+ * Receipt parsing — supports multiple backend shapes.
+ * We try a bunch of likely locations so you don't have to match one exact format.
+ */
+function normalizeUploadReceiptResponse(res) {
+    // res could be: {success, data:{document, scan}} or {success,data:{documentId, extracted}} etc
+    const data = res?.data || res || {};
+
+    const doc =
+        data.document ||
+        data.receipt ||
+        data.file ||
+        data.upload ||
+        data;
+
+    const documentId =
+        doc?._id ||
+        doc?.id ||
+        data.documentId ||
+        data.receiptId ||
+        data.id ||
+        null;
+
+    const scan =
+        data.scan ||
+        data.extracted ||
+        data.ocr ||
+        data.meta ||
+        doc?.scan ||
+        doc?.extracted ||
+        doc?.ocr ||
+        null;
+
+    const vendor = scan?.vendor || scan?.merchant || data.vendor || "";
+    const totalRaw = scan?.total ?? scan?.amount ?? data.total ?? data.amount;
+    const total = Number(totalRaw);
+    const dateRaw = scan?.date || scan?.serviceDate || data.date || data.receiptDate;
+
+    const summary =
+        scan?.summary ||
+        scan?.textSummary ||
+        data.summary ||
+        "";
+
+    const createdAt = doc?.createdAt || data.createdAt || null;
+    const name = doc?.originalName || doc?.filename || doc?.name || "Receipt";
+
+    const parsedDateISO = (() => {
+        if (!dateRaw) return null;
+        const dt = new Date(dateRaw);
+        return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+    })();
+
+    return {
+        documentId,
+        name,
+        createdAt,
+        scan: scan || null,
+        vendor: vendor || "",
+        total: Number.isFinite(total) ? total : null,
+        dateISO: parsedDateISO,
+        summary: summary || "",
+    };
+}
 
 export default function MaintenancePage() {
     const { token } = useAuth();
     const { propertyId } = useParams();
 
+    // ---------- page state ----------
     const [loading, setLoading] = useState(true);
     const [pageError, setPageError] = useState("");
     const [actionMsg, setActionMsg] = useState("");
 
+    // ---------- logs ----------
     const [logs, setLogs] = useState([]);
 
-    // Create form (manual + can be auto-filled)
-    const [form, setForm] = useState({
+    // Create log (manual entry)
+    const [createForm, setCreateForm] = useState({
+        title: "",
+        category: "General",
+        vendor: "",
+        serviceDate: toDateInputValue(new Date()),
+        cost: "",
+        notes: "",
+        nextDueDate: "",
+        reminderEnabled: true,
+    });
+    const [creating, setCreating] = useState(false);
+    const [createError, setCreateError] = useState("");
+
+    // List controls
+    const [search, setSearch] = useState("");
+    const [sort, setSort] = useState("newest"); // newest|oldest|costHigh|costLow
+
+    // Edit modal
+    const [editOpen, setEditOpen] = useState(false);
+    const [editSubmitting, setEditSubmitting] = useState(false);
+    const [editError, setEditError] = useState("");
+    const [editTarget, setEditTarget] = useState(null);
+    const [editForm, setEditForm] = useState({
         title: "",
         category: "General",
         vendor: "",
@@ -25,541 +211,375 @@ export default function MaintenancePage() {
         reminderEnabled: true,
     });
 
-    const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
+    // ---------- “Upload receipt → scan → create log” ----------
+    const receiptFileRef = useRef(null);
+    const [receiptUploading, setReceiptUploading] = useState(false);
+    const [receiptUploadError, setReceiptUploadError] = useState("");
+    const [receiptUploadMsg, setReceiptUploadMsg] = useState("");
 
-    // Documents state (per maintenance log)
-    const [docsByLogId, setDocsByLogId] = useState({});
-    const [docsLoadingByLogId, setDocsLoadingByLogId] = useState({});
-    const [docsErrorByLogId, setDocsErrorByLogId] = useState({});
-    const [docActionLoadingById, setDocActionLoadingById] = useState({});
+    const [receiptCreateOpen, setReceiptCreateOpen] = useState(false);
+    const [receiptCreateBusy, setReceiptCreateBusy] = useState(false);
+    const [receiptCreateError, setReceiptCreateError] = useState("");
 
-    // Upload + Scan state (per existing log)
-    const [scanFileByLogId, setScanFileByLogId] = useState({});
-    const [scanStatusByLogId, setScanStatusByLogId] = useState({});
-    const [scanBusyByLogId, setScanBusyByLogId] = useState({});
-    const [scanExtractedByLogId, setScanExtractedByLogId] = useState({});
-
-    // NEW: Create from receipt (unattached receipt -> extracted -> create log -> attach)
-    const [newReceiptFile, setNewReceiptFile] = useState(null);
-    const [newReceiptBusy, setNewReceiptBusy] = useState(false);
-    const [newReceiptStatus, setNewReceiptStatus] = useState("");
-    const [newReceiptDocId, setNewReceiptDocId] = useState(null);
-    const [newExtracted, setNewExtracted] = useState(null);
-
-    // Track which fields were extracted for badges (for the create form)
-    const [extractedFields, setExtractedFields] = useState({
-        title: false,
-        vendor: false,
-        category: false,
-        cost: false,
-        serviceDate: false,
+    const [uploadedReceipt, setUploadedReceipt] = useState(null); // normalized {documentId, vendor, total, dateISO, ...}
+    const [receiptOverrides, setReceiptOverrides] = useState({
+        title: "",
+        category: "General",
+        vendor: "",
+        serviceDate: toDateInputValue(new Date()),
+        cost: "",
+        notes: "",
+        nextDueDate: "",
+        reminderEnabled: true,
     });
 
-    // Preview modal
-    const [preview, setPreview] = useState(null); // { url, mimeType, name }
-    const previewUrlRef = useRef(null);
-
-    function unwrap(result) {
-        const body = result?.data ? result.data : result;
-        if (!body) return null;
-        if (typeof body === "object" && body.data && typeof body.data === "object") return body.data;
-        return body;
-    }
-
-    function updateField(key, value) {
-        setForm((f) => ({ ...f, [key]: value }));
-        // If user edits a field manually, remove extracted badge for that field (nice UX)
-        if (key in extractedFields) {
-            setExtractedFields((prev) => ({ ...prev, [key]: false }));
-        }
-    }
-
-    function applyExtractedToForm(extracted) {
-        if (!extracted) return;
-
-        const hasTitle = !!extracted.titleSuggestion;
-        const hasVendor = !!extracted.vendor;
-        const hasCategory = !!extracted.category;
-        const hasCost = typeof extracted.amount === "number";
-        const hasDate = !!extracted.date;
-
-        setForm((prev) => ({
-            ...prev,
-            title: hasTitle ? extracted.titleSuggestion : prev.title,
-            vendor: hasVendor ? extracted.vendor : prev.vendor,
-            category: hasCategory ? extracted.category : prev.category,
-            cost: hasCost ? Number(extracted.amount).toFixed(2) : prev.cost,
-            serviceDate: hasDate ? new Date(extracted.date).toISOString().slice(0, 10) : prev.serviceDate,
-        }));
-
-        setExtractedFields({
-            title: hasTitle,
-            vendor: hasVendor,
-            category: hasCategory,
-            cost: hasCost,
-            serviceDate: hasDate,
-        });
-    }
-
-    async function loadDocumentsForLog(logId) {
-        setDocsLoadingByLogId((prev) => ({ ...prev, [logId]: true }));
-        setDocsErrorByLogId((prev) => ({ ...prev, [logId]: "" }));
-
-        try {
-            const res = await api.listMaintenanceDocuments(propertyId, logId, token);
-            const payload = unwrap(res);
-            const docs = payload?.documents || payload?.docs || payload?.items || [];
-            setDocsByLogId((prev) => ({ ...prev, [logId]: Array.isArray(docs) ? docs : [] }));
-        } catch (err) {
-            setDocsErrorByLogId((prev) => ({
-                ...prev,
-                [logId]: err.message || "Failed to load documents.",
-            }));
-        } finally {
-            setDocsLoadingByLogId((prev) => ({ ...prev, [logId]: false }));
-        }
-    }
-
-    async function load() {
+    // ---------- load logs ----------
+    async function loadLogs() {
         setLoading(true);
         setPageError("");
         setActionMsg("");
-
         try {
             const res = await api.listMaintenance(propertyId, token);
-            const payload = unwrap(res);
-
-            const items = payload?.logs || payload?.maintenance || payload?.items || [];
-            const arr = Array.isArray(items) ? items : [];
-            setLogs(arr);
-
-            await Promise.all(arr.map((log) => loadDocumentsForLog(log._id)));
+            const list = res?.data?.items || res?.data?.logs || res?.data || [];
+            setLogs(Array.isArray(list) ? list : []);
         } catch (err) {
-            setPageError(err.message || "Failed to load maintenance logs.");
+            setPageError(err?.message || "Failed to load maintenance logs.");
+            setLogs([]);
         } finally {
             setLoading(false);
         }
     }
 
     useEffect(() => {
-        load();
+        loadLogs();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [propertyId]);
 
-    // Cleanup preview object URL on unmount / change
-    useEffect(() => {
-        return () => {
-            if (previewUrlRef.current) {
-                URL.revokeObjectURL(previewUrlRef.current);
-                previewUrlRef.current = null;
-            }
-        };
-    }, []);
+    // ---------- computed ----------
+    const totalSpend = useMemo(() => {
+        return logs.reduce((sum, x) => sum + Number(x?.cost || 0), 0);
+    }, [logs]);
 
-    // Cleanup: if user uploaded a new receipt (unattached) but navigates away without saving log
-    useEffect(() => {
-        return () => {
-            // best-effort cleanup; do not throw
-            if (newReceiptDocId && token && api?.deleteReceipt) {
-                api.deleteReceipt(newReceiptDocId, token).catch(() => { });
-            }
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [newReceiptDocId]);
+    const filteredSortedLogs = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        let arr = [...logs];
 
-    async function handleCreate(e) {
-        e.preventDefault();
-        setFormError("");
-        setActionMsg("");
-
-        if (!form.title.trim()) {
-            setFormError("Title is required.");
-            return;
-        }
-
-        const payload = {
-            title: form.title.trim(),
-            category: form.category?.trim() || "General",
-            vendor: form.vendor?.trim() || "",
-            serviceDate: form.serviceDate ? form.serviceDate : null,
-            cost: form.cost === "" ? null : Number(form.cost),
-            notes: form.notes?.trim() || "",
-            nextDueDate: form.nextDueDate ? form.nextDueDate : null,
-            reminderEnabled: !!form.reminderEnabled,
-        };
-
-        setSubmitting(true);
-        try {
-            await api.createMaintenance(propertyId, payload, token);
-
-            setForm((f) => ({
-                ...f,
-                title: "",
-                vendor: "",
-                serviceDate: "",
-                cost: "",
-                notes: "",
-                nextDueDate: "",
-            }));
-
-            setExtractedFields({
-                title: false,
-                vendor: false,
-                category: false,
-                cost: false,
-                serviceDate: false,
+        if (q) {
+            arr = arr.filter((x) => {
+                const hay = [
+                    x?.title,
+                    x?.category,
+                    x?.vendor,
+                    x?.notes,
+                    safeDateLabel(x?.serviceDate),
+                    safeDateLabel(x?.nextDueDate),
+                ]
+                    .filter(Boolean)
+                    .join(" ")
+                    .toLowerCase();
+                return hay.includes(q);
             });
-
-            await load();
-            setActionMsg("Maintenance log saved ✅");
-        } catch (err) {
-            setFormError(err.message || "Failed to create maintenance log.");
-        } finally {
-            setSubmitting(false);
         }
+
+        const numCost = (v) => (typeof v === "number" ? v : Number(v || 0));
+
+        if (sort === "oldest") {
+            arr.sort((a, b) => new Date(a?.serviceDate || 0) - new Date(b?.serviceDate || 0));
+        } else if (sort === "costHigh") {
+            arr.sort((a, b) => numCost(b?.cost) - numCost(a?.cost));
+        } else if (sort === "costLow") {
+            arr.sort((a, b) => numCost(a?.cost) - numCost(b?.cost));
+        } else {
+            arr.sort((a, b) => new Date(b?.serviceDate || 0) - new Date(a?.serviceDate || 0));
+        }
+
+        return arr;
+    }, [logs, search, sort]);
+
+    // ---------- helpers ----------
+    function setCreateField(key, value) {
+        setCreateForm((f) => ({ ...f, [key]: value }));
     }
 
-    /* ================= NEW FLOW: Upload & Scan -> Create Log -> Attach Receipt ================= */
-
-    async function handleNewUploadAndScan() {
-        setActionMsg("");
-        setNewReceiptStatus("");
-
-        if (!newReceiptFile) {
-            setNewReceiptStatus("Please select a receipt file first.");
-            return;
-        }
-
-        setNewReceiptBusy(true);
-        try {
-            setNewReceiptStatus("Uploading…");
-            const uploadRes = await api.uploadReceipt(newReceiptFile, token);
-            const payload = unwrap(uploadRes) || {};
-
-            const documentId =
-                payload?.documentId ||
-                payload?.document?._id ||
-                payload?._id ||
-                uploadRes?.data?.documentId ||
-                uploadRes?.data?.document?._id;
-
-            const extracted =
-                payload?.extracted ||
-                payload?.document?.extracted ||
-                uploadRes?.data?.extracted ||
-                uploadRes?.data?.document?.extracted ||
-                null;
-
-            if (!documentId) throw new Error("Receipt upload succeeded but no documentId was returned.");
-
-            setNewReceiptDocId(documentId);
-            setNewExtracted(extracted || {});
-            applyExtractedToForm(extracted || {});
-
-            setNewReceiptStatus("Scanned ✅ (review fields, then Save log / attach receipt)");
-            setActionMsg("Receipt scanned — review the suggested fields ✅");
-        } catch (err) {
-            setNewReceiptStatus(err.message || "Upload and scan failed.");
-        } finally {
-            setNewReceiptBusy(false);
-        }
+    function setEditField(key, value) {
+        setEditForm((f) => ({ ...f, [key]: value }));
     }
 
-    async function handleSaveLogAndAttachReceipt(e) {
-        e.preventDefault();
-        setFormError("");
+    function openEdit(log) {
+        setEditTarget(log);
+        setEditError("");
         setActionMsg("");
-        setNewReceiptStatus("");
 
-        if (!newReceiptDocId) {
-            setFormError("Please upload and scan a receipt first.");
-            return;
-        }
-
-        if (!form.title.trim()) {
-            setFormError("Title is required.");
-            return;
-        }
-
-        // IMPORTANT: serviceDate is required in your MaintenanceLog schema
-        if (!form.serviceDate) {
-            setFormError("Service date is required (add it or scan a receipt that contains it).");
-            return;
-        }
-
-        const payload = {
-            title: form.title.trim(),
-            category: form.category?.trim() || "General",
-            vendor: form.vendor?.trim() || "",
-            serviceDate: form.serviceDate,
-            cost: form.cost === "" ? 0 : Number(form.cost),
-            notes: form.notes?.trim() || "",
-            nextDueDate: form.nextDueDate ? form.nextDueDate : null,
-            reminderEnabled: !!form.reminderEnabled,
-        };
-
-        setSubmitting(true);
-        try {
-            // 1) Create log
-            const createdRes = await api.createMaintenance(propertyId, payload, token);
-            const createdPayload = unwrap(createdRes) || {};
-            const createdLog =
-                createdPayload?.log || createdPayload?.maintenanceLog || createdPayload?.item || createdPayload;
-
-            const logId = createdLog?._id;
-            if (!logId) {
-                throw new Error("Log created but could not find logId. Check createMaintenance response shape.");
-            }
-
-            // 2) Attach receipt to newly created log
-            await api.attachReceipt(newReceiptDocId, propertyId, logId, token);
-
-            // 3) Clear receipt state so cleanup doesn't delete it
-            setNewReceiptFile(null);
-            setNewReceiptDocId(null);
-            setNewExtracted(null);
-
-            // 4) Reset form
-            setForm((f) => ({
-                ...f,
-                title: "",
-                vendor: "",
-                serviceDate: "",
-                cost: "",
-                notes: "",
-                nextDueDate: "",
-            }));
-
-            setExtractedFields({
-                title: false,
-                vendor: false,
-                category: false,
-                cost: false,
-                serviceDate: false,
-            });
-
-            await load();
-            setActionMsg("Log created + receipt attached ✅");
-        } catch (err) {
-            setFormError(err.message || "Server error while saving and attaching receipt.");
-        } finally {
-            setSubmitting(false);
-        }
-    }
-
-    async function handleCancelNewReceipt() {
-        setActionMsg("");
-        setNewReceiptStatus("");
-
-        const docId = newReceiptDocId;
-        setNewReceiptFile(null);
-        setNewReceiptDocId(null);
-        setNewExtracted(null);
-
-        // reset extracted badges (but keep user values)
-        setExtractedFields({
-            title: false,
-            vendor: false,
-            category: false,
-            cost: false,
-            serviceDate: false,
+        setEditForm({
+            title: log?.title || "",
+            category: log?.category || "General",
+            vendor: log?.vendor || "",
+            serviceDate: toDateInputValue(log?.serviceDate) || "",
+            cost: typeof log?.cost === "number" ? String(log.cost) : String(log?.cost || ""),
+            notes: log?.notes || "",
+            nextDueDate: toDateInputValue(log?.nextDueDate) || "",
+            reminderEnabled: typeof log?.reminderEnabled === "boolean" ? log.reminderEnabled : true,
         });
 
-        if (docId) {
-            try {
-                await api.deleteReceipt(docId, token);
-                setActionMsg("Unattached receipt removed ✅");
-            } catch {
-                // ignore
-            }
-        }
+        setEditOpen(true);
     }
 
-    /* ================= EXISTING LOG FLOW: Upload & Scan & Attach ================= */
-
-    function setScanStatus(logId, msg) {
-        setScanStatusByLogId((prev) => ({ ...prev, [logId]: msg }));
+    function closeEdit() {
+        if (editSubmitting) return;
+        setEditOpen(false);
+        setEditTarget(null);
+        setEditError("");
     }
 
-    async function handleUploadAndScan(logId) {
-        setActionMsg("");
-        setScanStatus(logId, "");
-
-        const file = scanFileByLogId[logId];
-        if (!file) {
-            setScanStatus(logId, "Please select a receipt file first.");
-            return;
-        }
-
-        if (!api.uploadReceipt) {
-            setScanStatus(logId, "api.uploadReceipt is missing in src/services/api.js");
-            return;
-        }
-        if (!api.attachReceipt) {
-            setScanStatus(logId, "api.attachReceipt is missing in src/services/api.js");
-            return;
-        }
-
-        setScanBusyByLogId((prev) => ({ ...prev, [logId]: true }));
-
-        try {
-            setScanStatus(logId, "Uploading…");
-
-            const uploadRes = await api.uploadReceipt(file, token);
-            const uploadPayload = unwrap(uploadRes) || {};
-
-            const documentId =
-                uploadPayload?.documentId ||
-                uploadPayload?.document?._id ||
-                uploadPayload?._id ||
-                uploadRes?.data?.documentId ||
-                uploadRes?.data?.document?._id;
-
-            const extracted =
-                uploadPayload?.extracted ||
-                uploadPayload?.document?.extracted ||
-                uploadRes?.data?.extracted ||
-                uploadRes?.data?.document?.extracted ||
-                null;
-
-            if (!documentId) {
-                throw new Error("Receipt upload succeeded but no documentId was returned.");
-            }
-
-            setScanStatus(logId, "Attaching…");
-            await api.attachReceipt(documentId, propertyId, logId, token);
-
-            setScanExtractedByLogId((prev) => ({ ...prev, [logId]: extracted || {} }));
-            setScanFileByLogId((prev) => ({ ...prev, [logId]: null }));
-
-            await loadDocumentsForLog(logId);
-
-            setScanStatus(logId, "Uploaded + attached ✅");
-            setActionMsg("Receipt uploaded and scanned ✅");
-        } catch (err) {
-            setScanStatus(logId, err.message || "Upload and scan failed.");
-        } finally {
-            setScanBusyByLogId((prev) => ({ ...prev, [logId]: false }));
-        }
-    }
-
-    /* ================= Docs download / delete / preview ================= */
-
-    async function handleDownloadDoc(logId, documentId) {
-        setActionMsg("Starting download…");
-
-        try {
-            setDocActionLoadingById((prev) => ({ ...prev, [documentId]: true }));
-
-            const { blob, filename } = await api.downloadMaintenanceDocument(propertyId, logId, documentId, token);
-
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = filename || "document";
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-
-            setActionMsg("Download started ✅");
-        } catch (err) {
-            setActionMsg(err.message || "Download failed.");
-        } finally {
-            setDocActionLoadingById((prev) => ({ ...prev, [documentId]: false }));
-        }
-    }
-
-    async function handlePreviewDoc(logId, doc) {
+    // ---------- CRUD logs (manual entry) ----------
+    async function handleCreateManual(e) {
+        e.preventDefault();
+        setCreateError("");
         setActionMsg("");
 
+        if (!createForm.title.trim()) {
+            setCreateError("Title is required.");
+            return;
+        }
+        if (!createForm.serviceDate) {
+            setCreateError("Service date is required.");
+            return;
+        }
+
+        const costNum = createForm.cost === "" ? 0 : Number(createForm.cost);
+        if (!Number.isFinite(costNum) || costNum < 0) {
+            setCreateError("Cost must be a valid number.");
+            return;
+        }
+
+        const payload = {
+            title: createForm.title.trim(),
+            category: (createForm.category || "General").trim(),
+            vendor: (createForm.vendor || "").trim(),
+            serviceDate: fromDateInputValue(createForm.serviceDate),
+            cost: costNum,
+            notes: (createForm.notes || "").trim(),
+            reminderEnabled: !!createForm.reminderEnabled,
+            nextDueDate: createForm.nextDueDate ? fromDateInputValue(createForm.nextDueDate) : null,
+        };
+
+        setCreating(true);
         try {
-            setDocActionLoadingById((prev) => ({ ...prev, [doc._id]: true }));
+            // matches your api.js: createMaintenance(propertyId, payload, token)
+            await api.createMaintenance(propertyId, payload, token);
 
-            const { blob, filename } = await api.downloadMaintenanceDocument(propertyId, logId, doc._id, token);
-
-            // cleanup old preview url
-            if (previewUrlRef.current) {
-                URL.revokeObjectURL(previewUrlRef.current);
-                previewUrlRef.current = null;
-            }
-
-            const url = URL.createObjectURL(blob);
-            previewUrlRef.current = url;
-
-            setPreview({
-                url,
-                mimeType: doc.mimeType || blob.type || "application/octet-stream",
-                name: doc.originalName || filename || "Receipt",
+            setCreateForm({
+                title: "",
+                category: "General",
+                vendor: "",
+                serviceDate: toDateInputValue(new Date()),
+                cost: "",
+                notes: "",
+                nextDueDate: "",
+                reminderEnabled: true,
             });
+
+            setActionMsg("Log created ✅");
+            await loadLogs();
         } catch (err) {
-            setActionMsg(err.message || "Preview failed.");
+            setCreateError(err?.message || "Failed to create log.");
         } finally {
-            setDocActionLoadingById((prev) => ({ ...prev, [doc._id]: false }));
+            setCreating(false);
         }
     }
 
-    function closePreview() {
-        if (previewUrlRef.current) {
-            URL.revokeObjectURL(previewUrlRef.current);
-            previewUrlRef.current = null;
-        }
-        setPreview(null);
-    }
+    async function handleSaveEdit(e) {
+        e.preventDefault();
+        e.stopPropagation();
 
-    async function handleDeleteDoc(logId, documentId) {
+        setEditError("");
         setActionMsg("");
 
+        if (!editTarget?._id) {
+            setEditError("Missing log id.");
+            return;
+        }
+        if (!editForm.title.trim()) {
+            setEditError("Title is required.");
+            return;
+        }
+        if (!editForm.serviceDate) {
+            setEditError("Service date is required.");
+            return;
+        }
+
+        const costNum = editForm.cost === "" ? 0 : Number(editForm.cost);
+        if (!Number.isFinite(costNum) || costNum < 0) {
+            setEditError("Cost must be a valid number.");
+            return;
+        }
+
+        const payload = {
+            title: editForm.title.trim(),
+            category: (editForm.category || "General").trim(),
+            vendor: (editForm.vendor || "").trim(),
+            serviceDate: fromDateInputValue(editForm.serviceDate),
+            cost: costNum,
+            notes: (editForm.notes || "").trim(),
+            reminderEnabled: !!editForm.reminderEnabled,
+            nextDueDate: editForm.nextDueDate ? fromDateInputValue(editForm.nextDueDate) : null,
+        };
+
+        setEditSubmitting(true);
         try {
-            const ok = window.confirm("Delete this document?");
-            if (!ok) return;
-
-            setDocActionLoadingById((prev) => ({ ...prev, [documentId]: true }));
-
-            await api.deleteMaintenanceDocument(propertyId, logId, documentId, token);
-            await loadDocumentsForLog(logId);
-
-            setActionMsg("Document deleted ✅");
+            await api.updateMaintenanceLog(propertyId, editTarget._id, payload, token);
+            setActionMsg("Log updated ✅");
+            setEditOpen(false);
+            setEditTarget(null);
+            await loadLogs();
         } catch (err) {
-            setActionMsg(err.message || "Delete failed.");
+            setEditError(err?.message || "Failed to update log.");
         } finally {
-            setDocActionLoadingById((prev) => ({ ...prev, [documentId]: false }));
+            setEditSubmitting(false);
         }
     }
 
-    async function handleDeleteLog(logId) {
+    async function handleDelete(logId) {
         setActionMsg("");
+        setPageError("");
+
+        const ok = window.confirm("Delete this maintenance log? This cannot be undone.");
+        if (!ok) return;
 
         try {
-            const ok = window.confirm("Delete this maintenance log? (Any attached documents will be removed too.)");
-            if (!ok) return;
-
             await api.deleteMaintenanceLog(propertyId, logId, token);
-            await load();
-
-            setActionMsg("Maintenance log deleted ✅");
+            setActionMsg("Log deleted ✅");
+            await loadLogs();
         } catch (err) {
-            setActionMsg(err.message || "Delete failed.");
+            setPageError(err?.message || "Failed to delete log.");
         }
     }
 
-    const logCountLabel = useMemo(() => {
-        const n = logs.length;
-        return `${n} log${n === 1 ? "" : "s"}`;
-    }, [logs.length]);
+    // ---------- RECEIPT FLOW (restored): Upload receipt -> Scan -> Open override modal -> Create log ----------
+    async function handleUploadReceiptFile(file) {
+        setReceiptUploading(true);
+        setReceiptUploadError("");
+        setReceiptUploadMsg("");
+        setReceiptCreateError("");
+        setActionMsg("");
+
+        try {
+            const res = await api.uploadReceipt(file, token);
+            const normalized = normalizeUploadReceiptResponse(res);
+
+            if (!normalized.documentId) {
+                throw new Error(
+                    "Receipt uploaded but no documentId returned. Check backend uploadReceipt response."
+                );
+            }
+
+            setUploadedReceipt(normalized);
+
+            // Prefill overrides from scan
+            const vendor = normalized.vendor || "";
+            const total = normalized.total;
+            const dateISO = normalized.dateISO;
+
+            setReceiptOverrides({
+                title: vendor ? `Receipt: ${vendor}` : "Receipt entry",
+                category: "General",
+                vendor,
+                serviceDate: dateISO ? toDateInputValue(dateISO) : toDateInputValue(new Date()),
+                cost: total !== null ? String(total) : "",
+                notes: normalized.summary || "",
+                nextDueDate: "",
+                reminderEnabled: true,
+            });
+
+            setReceiptUploadMsg("Receipt uploaded + scanned ✅ Review and create the entry below.");
+            setReceiptCreateOpen(true);
+        } catch (err) {
+            setReceiptUploadError(err?.message || "Failed to upload receipt.");
+        } finally {
+            setReceiptUploading(false);
+            if (receiptFileRef.current) receiptFileRef.current.value = "";
+        }
+    }
+
+    function closeReceiptCreate() {
+        if (receiptCreateBusy) return;
+        setReceiptCreateOpen(false);
+        setReceiptCreateError("");
+    }
+
+    function setReceiptField(key, value) {
+        setReceiptOverrides((f) => ({ ...f, [key]: value }));
+    }
+
+    async function handleCreateLogFromReceipt() {
+        setReceiptCreateError("");
+        setActionMsg("");
+
+        const rid = uploadedReceipt?.documentId;
+        if (!rid) {
+            setReceiptCreateError("Missing receipt documentId.");
+            return;
+        }
+
+        if (!receiptOverrides.title.trim()) {
+            setReceiptCreateError("Title is required.");
+            return;
+        }
+        if (!receiptOverrides.serviceDate) {
+            setReceiptCreateError("Service date is required.");
+            return;
+        }
+
+        const costNum = receiptOverrides.cost === "" ? 0 : Number(receiptOverrides.cost);
+        if (!Number.isFinite(costNum) || costNum < 0) {
+            setReceiptCreateError("Cost must be a valid number.");
+            return;
+        }
+
+        const overrides = {
+            title: receiptOverrides.title.trim(),
+            category: (receiptOverrides.category || "General").trim(),
+            vendor: (receiptOverrides.vendor || "").trim(),
+            serviceDate: fromDateInputValue(receiptOverrides.serviceDate),
+            cost: costNum,
+            notes: (receiptOverrides.notes || "").trim(),
+            reminderEnabled: !!receiptOverrides.reminderEnabled,
+            nextDueDate: receiptOverrides.nextDueDate ? fromDateInputValue(receiptOverrides.nextDueDate) : null,
+        };
+
+        setReceiptCreateBusy(true);
+        try {
+            await api.createLogFromReceipt(rid, propertyId, overrides, token);
+            setActionMsg("Entry created from receipt ✅");
+            setReceiptCreateOpen(false);
+            setUploadedReceipt(null);
+            await loadLogs();
+        } catch (err) {
+            setReceiptCreateError(err?.message || "Failed to create entry from receipt.");
+        } finally {
+            setReceiptCreateBusy(false);
+        }
+    }
 
     return (
         <div className="hk-container">
             <div className="hk-header">
                 <div>
                     <h2 className="hk-title">Maintenance</h2>
-                    <p className="hk-subtitle">Track repairs and upkeep. Upload receipts and auto-fill details.</p>
+                    <p className="hk-subtitle">
+                        Add and manage maintenance logs for this property. Total spend:{" "}
+                        <strong>{money(totalSpend)}</strong>
+                    </p>
                 </div>
 
-                <Link className="hk-link" to="/properties">
-                    ← Back to properties
-                </Link>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                    <Link className="hk-link" to="/properties">
+                        ← Back to properties
+                    </Link>
+                    <button className="hk-btn" type="button" onClick={loadLogs} disabled={loading}>
+                        {loading ? "Refreshing…" : "Refresh"}
+                    </button>
+                </div>
             </div>
 
             {actionMsg && (
@@ -567,417 +587,482 @@ export default function MaintenancePage() {
                     {actionMsg}
                 </div>
             )}
+            {pageError && <div className="hk-error">{pageError}</div>}
 
+            {/* ✅ RESTORED: Upload receipt -> scan -> create entry */}
+            <div className="hk-card hk-card-pad" style={{ marginBottom: 12 }}>
+                <div className="hk-row" style={{ marginBottom: 10 }}>
+                    <div>
+                        <div style={{ fontWeight: 900, fontSize: 16 }}>Create entry from receipt (scan + override)</div>
+                        <div className="hk-muted" style={{ fontSize: 13 }}>
+                            Upload a receipt to auto-extract vendor/date/total. You can override anything before saving.
+                        </div>
+                    </div>
+                    <Pill>Receipt scan</Pill>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <input
+                        ref={receiptFileRef}
+                        type="file"
+                        accept="application/pdf,image/*"
+                        disabled={receiptUploading}
+                        onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            handleUploadReceiptFile(file);
+                        }}
+                    />
+                    {receiptUploading ? <span className="hk-muted">Uploading + scanning…</span> : null}
+                    <span className="hk-muted" style={{ fontSize: 12 }}>
+                        Supported: PDF / images
+                    </span>
+                </div>
+
+                {receiptUploadMsg ? <div className="hk-muted" style={{ marginTop: 10 }}>{receiptUploadMsg}</div> : null}
+                {receiptUploadError ? <div className="hk-error" style={{ marginTop: 10 }}>{receiptUploadError}</div> : null}
+
+                {uploadedReceipt ? (
+                    <div className="hk-card hk-card-pad" style={{ marginTop: 12, background: "rgba(255,255,255,0.04)" }}>
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                            <div style={{ fontWeight: 900 }}>{uploadedReceipt.name || "Receipt"}</div>
+                            <Pill>ID: {String(uploadedReceipt.documentId).slice(-6)}</Pill>
+                            {uploadedReceipt.vendor ? <Pill>Vendor: {uploadedReceipt.vendor}</Pill> : null}
+                            {uploadedReceipt.total !== null ? <Pill>Total: {money(uploadedReceipt.total)}</Pill> : null}
+                            {uploadedReceipt.dateISO ? <Pill>Date: {safeDateLabel(uploadedReceipt.dateISO)}</Pill> : null}
+                            {uploadedReceipt.createdAt ? <Pill>Uploaded: {safeTimeLabel(uploadedReceipt.createdAt)}</Pill> : null}
+
+                            <div style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
+                                <button className="hk-btn" type="button" onClick={() => setReceiptCreateOpen(true)}>
+                                    Review / create entry →
+                                </button>
+                            </div>
+                        </div>
+
+                        {uploadedReceipt.summary ? (
+                            <div className="hk-muted" style={{ marginTop: 10, fontSize: 13 }}>
+                                {clampStr(uploadedReceipt.summary)}
+                            </div>
+                        ) : null}
+
+                        <div className="hk-muted" style={{ marginTop: 8, fontSize: 12 }}>
+                            If vendor/total/date didn’t populate, your scan still ran — it just didn’t extract fields confidently. You can override manually in the next screen.
+                        </div>
+                    </div>
+                ) : null}
+            </div>
+
+            {/* Main split: manual entry + logs list */}
             <div className="hk-split">
-                {/* LEFT */}
+                {/* Left: Manual entry */}
                 <section className="hk-card hk-card-pad">
                     <div className="hk-row" style={{ marginBottom: 10 }}>
-                        <h3 className="hk-section-title">Add maintenance log</h3>
-                        <span className="hk-pill">HomeKeep</span>
+                        <h3 className="hk-section-title">Manual entry</h3>
+                        <span className="hk-pill">Add without receipt</span>
                     </div>
 
-                    {/* ✅ NEW: Upload receipt first -> auto-fill -> Save log + attach */}
-                    <div style={{ marginBottom: 14 }}>
-                        <div className="hk-muted" style={{ fontSize: 13, marginBottom: 6, fontWeight: 800 }}>
-                            Create from receipt (Upload & Scan)
-                        </div>
-
-                        <div className="hk-actions" style={{ alignItems: "center" }}>
-                            <input
-                                className="hk-input"
-                                type="file"
-                                accept="application/pdf,image/*"
-                                onChange={(e) => setNewReceiptFile(e.target.files?.[0] || null)}
-                                style={{ maxWidth: 360 }}
-                            />
-
-                            <button
-                                type="button"
-                                className="hk-btn"
-                                disabled={newReceiptBusy}
-                                onClick={handleNewUploadAndScan}
-                            >
-                                {newReceiptBusy ? "Working…" : "Upload & scan"}
-                            </button>
-
-                            {!!newReceiptDocId && (
-                                <button type="button" className="hk-btn hk-btn-ghost" onClick={handleCancelNewReceipt}>
-                                    Cancel
-                                </button>
-                            )}
-                        </div>
-
-                        {newReceiptStatus && (
-                            <div className={newReceiptStatus.includes("✅") ? "hk-muted" : "hk-error"} style={{ fontSize: 13, marginTop: 8 }}>
-                                {newReceiptStatus}
-                            </div>
-                        )}
-
-                        {newExtracted && (
-                            <div className="hk-muted" style={{ fontSize: 12, marginTop: 6 }}>
-                                <strong>Scan summary:</strong>{" "}
-                                {newExtracted.vendor ? `Vendor: ${newExtracted.vendor} • ` : ""}
-                                {typeof newExtracted.amount === "number" ? `Amount: $${newExtracted.amount.toFixed(2)} • ` : ""}
-                                {newExtracted.date ? `Date: ${new Date(newExtracted.date).toLocaleDateString()}` : ""}
-                            </div>
-                        )}
-
-                        <div className="hk-divider" style={{ marginTop: 12 }} />
-                    </div>
-
-                    {/* Form (manual OR auto-filled from scan) */}
-                    <form onSubmit={newReceiptDocId ? handleSaveLogAndAttachReceipt : handleCreate} className="hk-form">
+                    <form onSubmit={handleCreateManual} className="hk-form">
                         <label className="hk-label">
-                            Title * {extractedFields.title && <ExtractedBadge />}
+                            Title *
                             <input
                                 className="hk-input"
-                                value={form.title}
-                                onChange={(e) => updateField("title", e.target.value)}
-                                placeholder="e.g., Dishwasher replacement"
-                            />
-                        </label>
-
-                        <label className="hk-label">
-                            Category {extractedFields.category && <ExtractedBadge />}
-                            <input
-                                className="hk-input"
-                                value={form.category}
-                                onChange={(e) => updateField("category", e.target.value)}
-                                placeholder="General / Electrical / Plumbing…"
-                            />
-                        </label>
-
-                        <label className="hk-label">
-                            Vendor {extractedFields.vendor && <ExtractedBadge />}
-                            <input
-                                className="hk-input"
-                                value={form.vendor}
-                                onChange={(e) => updateField("vendor", e.target.value)}
-                                placeholder="e.g., The Brick"
+                                value={createForm.title}
+                                onChange={(e) => setCreateField("title", e.target.value)}
+                                placeholder="e.g., Furnace service"
                             />
                         </label>
 
                         <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
                             <label className="hk-label">
-                                Service date {extractedFields.serviceDate && <ExtractedBadge />}
+                                Category
                                 <input
                                     className="hk-input"
-                                    type="date"
-                                    value={form.serviceDate}
-                                    onChange={(e) => updateField("serviceDate", e.target.value)}
+                                    value={createForm.category}
+                                    onChange={(e) => setCreateField("category", e.target.value)}
+                                    placeholder="General"
                                 />
                             </label>
 
                             <label className="hk-label">
-                                Cost {extractedFields.cost && <ExtractedBadge />}
+                                Vendor
                                 <input
                                     className="hk-input"
+                                    value={createForm.vendor}
+                                    onChange={(e) => setCreateField("vendor", e.target.value)}
+                                    placeholder="Optional"
+                                />
+                            </label>
+                        </div>
+
+                        <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                            <label className="hk-label">
+                                Service date *
+                                <input
+                                    className="hk-input"
+                                    type="date"
+                                    value={createForm.serviceDate}
+                                    onChange={(e) => setCreateField("serviceDate", e.target.value)}
+                                />
+                            </label>
+
+                            <label className="hk-label">
+                                Cost
+                                <input
+                                    className="hk-input"
+                                    value={createForm.cost}
+                                    onChange={(e) => setCreateField("cost", e.target.value)}
+                                    placeholder="0.00"
                                     inputMode="decimal"
-                                    value={form.cost}
-                                    onChange={(e) => updateField("cost", e.target.value)}
-                                    placeholder="e.g., 537.60"
                                 />
                             </label>
                         </div>
 
                         <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
                             <label className="hk-label">
-                                Next due date
+                                Next due date (reminder)
                                 <input
                                     className="hk-input"
                                     type="date"
-                                    value={form.nextDueDate}
-                                    onChange={(e) => updateField("nextDueDate", e.target.value)}
+                                    value={createForm.nextDueDate}
+                                    onChange={(e) => setCreateField("nextDueDate", e.target.value)}
                                 />
                             </label>
 
-                            <label className="hk-label" style={{ alignContent: "end" }}>
-                                <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                            <label className="hk-label" style={{ display: "grid", gap: 8 }}>
+                                Reminder enabled
+                                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                     <input
                                         type="checkbox"
-                                        checked={!!form.reminderEnabled}
-                                        onChange={(e) => updateField("reminderEnabled", e.target.checked)}
+                                        checked={!!createForm.reminderEnabled}
+                                        onChange={(e) => setCreateField("reminderEnabled", e.target.checked)}
                                     />
-                                    Enable reminders
-                                </span>
+                                    <span className="hk-muted" style={{ fontSize: 13 }}>
+                                        Include this log in reminders
+                                    </span>
+                                </div>
                             </label>
                         </div>
 
                         <label className="hk-label">
                             Notes
                             <textarea
-                                className="hk-textarea"
-                                rows={3}
-                                value={form.notes}
-                                onChange={(e) => updateField("notes", e.target.value)}
-                                placeholder="Anything you want to remember…"
+                                className="hk-input"
+                                rows={4}
+                                value={createForm.notes}
+                                onChange={(e) => setCreateField("notes", e.target.value)}
+                                placeholder="Optional notes"
                             />
                         </label>
 
-                        {formError && <div className="hk-error">{formError}</div>}
+                        {createError && <div className="hk-error">{createError}</div>}
 
                         <div className="hk-actions">
-                            <button className="hk-btn" disabled={submitting} type="submit">
-                                {submitting
-                                    ? "Saving…"
-                                    : newReceiptDocId
-                                        ? "Save log / attach receipt"
-                                        : "Save log"}
+                            <button className="hk-btn" type="submit" disabled={creating}>
+                                {creating ? "Saving…" : "Save log"}
                             </button>
                         </div>
                     </form>
                 </section>
 
-                {/* RIGHT */}
+                {/* Right: logs list */}
                 <section className="hk-card hk-card-pad">
                     <div className="hk-row" style={{ marginBottom: 10 }}>
                         <div>
                             <h3 className="hk-section-title">Logs</h3>
                             <div className="hk-muted" style={{ fontSize: 13 }}>
-                                {logCountLabel}
+                                {filteredSortedLogs.length} log{filteredSortedLogs.length === 1 ? "" : "s"} • Total{" "}
+                                {money(totalSpend)}
                             </div>
                         </div>
-
-                        <button type="button" className="hk-btn" onClick={load} disabled={loading}>
-                            Refresh
-                        </button>
                     </div>
 
-                    {pageError && <div className="hk-error">{pageError}</div>}
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 160px", gap: 10, marginBottom: 12 }}>
+                        <input
+                            className="hk-input"
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            placeholder="Search title, vendor, notes…"
+                        />
+                        <select className="hk-input" value={sort} onChange={(e) => setSort(e.target.value)}>
+                            <option value="newest">Sort: newest</option>
+                            <option value="oldest">Sort: oldest</option>
+                            <option value="costHigh">Sort: cost high → low</option>
+                            <option value="costLow">Sort: cost low → high</option>
+                        </select>
+                    </div>
 
                     {loading ? (
                         <div className="hk-muted">Loading…</div>
-                    ) : logs.length === 0 ? (
-                        <div className="hk-muted">No maintenance logs yet.</div>
+                    ) : filteredSortedLogs.length === 0 ? (
+                        <div className="hk-muted">No logs found.</div>
                     ) : (
                         <ul className="hk-list" style={{ marginTop: 0 }}>
-                            {logs.map((log) => {
-                                const docs = docsByLogId[log._id] || [];
-                                const docsLoading = !!docsLoadingByLogId[log._id];
-                                const docsError = docsErrorByLogId[log._id];
-
-                                const scanBusy = !!scanBusyByLogId[log._id];
-                                const scanStatus = scanStatusByLogId[log._id];
-                                const extracted = scanExtractedByLogId[log._id] || null;
-
-                                return (
-                                    <li key={log._id} style={{ marginBottom: 14 }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                                            <div>
-                                                <div style={{ fontWeight: 900 }}>{log.title}</div>
-
-                                                <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                    {log.category ? `${log.category} • ` : ""}
-                                                    {log.serviceDate ? new Date(log.serviceDate).toLocaleDateString() : "No service date"}
-                                                    {typeof log.cost === "number" ? ` • $${log.cost.toFixed(2)}` : ""}
-                                                </div>
-
-                                                <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                    Next due: {log.nextDueDate ? new Date(log.nextDueDate).toLocaleDateString() : "—"}
-                                                </div>
+                            {filteredSortedLogs.map((log) => (
+                                <li key={log._id} style={{ marginBottom: 12 }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                                        <div>
+                                            <div style={{ fontWeight: 900 }}>{log.title}</div>
+                                            <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                {log.category ? `${log.category} • ` : ""}
+                                                {log.vendor ? `${log.vendor} • ` : ""}
+                                                {log.serviceDate ? safeDateLabel(log.serviceDate) : ""}
+                                                {log.nextDueDate ? ` • Next due: ${safeDateLabel(log.nextDueDate)}` : ""}
+                                                {typeof log.reminderEnabled === "boolean"
+                                                    ? ` • Reminders: ${log.reminderEnabled ? "On" : "Off"}`
+                                                    : ""}
                                             </div>
+                                            {log.notes ? (
+                                                <div className="hk-muted" style={{ fontSize: 13, marginTop: 6 }}>
+                                                    {log.notes}
+                                                </div>
+                                            ) : null}
+                                        </div>
 
-                                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                                <span className="hk-pill">{log.reminderEnabled ? "Reminders On" : "Reminders Off"}</span>
-
-                                                <button type="button" className="hk-btn" onClick={() => handleDeleteLog(log._id)}>
-                                                    Delete log
+                                        <div style={{ display: "grid", gap: 8, justifyItems: "end" }}>
+                                            <div style={{ fontWeight: 900 }}>{money(log.cost)}</div>
+                                            <div style={{ display: "flex", gap: 10 }}>
+                                                <button className="hk-btn" type="button" onClick={() => openEdit(log)}>
+                                                    Edit
+                                                </button>
+                                                <button className="hk-btn" type="button" onClick={() => handleDelete(log._id)}>
+                                                    Delete
                                                 </button>
                                             </div>
                                         </div>
-
-                                        {/* Upload & Scan for existing */}
-                                        <div style={{ marginTop: 10 }}>
-                                            <div className="hk-muted" style={{ fontSize: 13, marginBottom: 6, fontWeight: 700 }}>
-                                                Upload & scan receipt (attach to this log)
-                                            </div>
-
-                                            <div className="hk-actions" style={{ alignItems: "center" }}>
-                                                <input
-                                                    className="hk-input"
-                                                    type="file"
-                                                    accept="application/pdf,image/*"
-                                                    onChange={(e) =>
-                                                        setScanFileByLogId((prev) => ({
-                                                            ...prev,
-                                                            [log._id]: e.target.files?.[0] || null,
-                                                        }))
-                                                    }
-                                                    style={{ maxWidth: 360 }}
-                                                />
-
-                                                <button
-                                                    type="button"
-                                                    className="hk-btn"
-                                                    disabled={scanBusy}
-                                                    onClick={() => handleUploadAndScan(log._id)}
-                                                >
-                                                    {scanBusy ? "Working…" : "Upload and scan"}
-                                                </button>
-
-                                                {scanStatus && (
-                                                    <span
-                                                        className={scanStatus.includes("✅") ? "hk-muted" : "hk-error"}
-                                                        style={{ fontSize: 13 }}
-                                                    >
-                                                        {scanStatus}
-                                                    </span>
-                                                )}
-                                            </div>
-
-                                            {extracted && Object.keys(extracted).length > 0 && (
-                                                <div className="hk-muted" style={{ fontSize: 13, marginTop: 8 }}>
-                                                    <strong>Extracted:</strong>{" "}
-                                                    {extracted.vendor ? `Vendor: ${extracted.vendor} • ` : ""}
-                                                    {typeof extracted.amount === "number" ? `Amount: $${extracted.amount.toFixed(2)} • ` : ""}
-                                                    {extracted.date ? `Date: ${new Date(extracted.date).toLocaleDateString()}` : ""}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Documents list */}
-                                        <div style={{ marginTop: 12 }}>
-                                            <div className="hk-muted" style={{ fontSize: 13, marginBottom: 6, fontWeight: 700 }}>
-                                                Documents
-                                            </div>
-
-                                            {docsLoading ? (
-                                                <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                    Loading documents…
-                                                </div>
-                                            ) : docsError ? (
-                                                <div className="hk-error" style={{ fontSize: 13 }}>
-                                                    {docsError}
-                                                </div>
-                                            ) : docs.length === 0 ? (
-                                                <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                    No documents uploaded yet.
-                                                </div>
-                                            ) : (
-                                                <ul className="hk-list" style={{ marginTop: 0 }}>
-                                                    {docs.map((d) => {
-                                                        const busy = !!docActionLoadingById[d._id];
-
-                                                        return (
-                                                            <li key={d._id} style={{ marginBottom: 10 }}>
-                                                                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                                                                    <div>
-                                                                        <div style={{ fontWeight: 800 }}>{d.originalName || "Document"}</div>
-                                                                        <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                                            {typeof d.size === "number" ? `${Math.round(d.size / 1024)} KB` : ""}
-                                                                            {d.extracted?.vendor ? ` • ${d.extracted.vendor}` : ""}
-                                                                            {typeof d.extracted?.amount === "number" ? ` • $${d.extracted.amount.toFixed(2)}` : ""}
-                                                                            {d.extracted?.date ? ` • ${new Date(d.extracted.date).toLocaleDateString()}` : ""}
-                                                                        </div>
-                                                                    </div>
-
-                                                                    <div style={{ display: "flex", gap: 8 }}>
-                                                                        <button
-                                                                            type="button"
-                                                                            className="hk-btn"
-                                                                            disabled={busy}
-                                                                            onClick={() => handlePreviewDoc(log._id, d)}
-                                                                        >
-                                                                            {busy ? "Working…" : "Preview"}
-                                                                        </button>
-
-                                                                        <button
-                                                                            type="button"
-                                                                            className="hk-btn"
-                                                                            disabled={busy}
-                                                                            onClick={() => handleDownloadDoc(log._id, d._id)}
-                                                                        >
-                                                                            {busy ? "Working…" : "Download"}
-                                                                        </button>
-
-                                                                        <button
-                                                                            type="button"
-                                                                            className="hk-btn"
-                                                                            disabled={busy}
-                                                                            onClick={() => handleDeleteDoc(log._id, d._id)}
-                                                                        >
-                                                                            {busy ? "Working…" : "Delete"}
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            </li>
-                                                        );
-                                                    })}
-                                                </ul>
-                                            )}
-                                        </div>
-
-                                        <div className="hk-divider" />
-                                    </li>
-                                );
-                            })}
+                                    </div>
+                                </li>
+                            ))}
                         </ul>
                     )}
                 </section>
             </div>
 
-            {/* Preview Modal */}
-            <ReceiptPreviewModal preview={preview} onClose={closePreview} />
-        </div>
-    );
-}
+            {/* Edit modal */}
+            <Modal open={editOpen} title="Edit maintenance log" onClose={closeEdit}>
+                <form onSubmit={handleSaveEdit} className="hk-form">
+                    <label className="hk-label">
+                        Title *
+                        <input
+                            className="hk-input"
+                            value={editForm.title}
+                            onChange={(e) => setEditField("title", e.target.value)}
+                        />
+                    </label>
 
-/* ================= Small UI bits ================= */
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label className="hk-label">
+                            Category
+                            <input
+                                className="hk-input"
+                                value={editForm.category}
+                                onChange={(e) => setEditField("category", e.target.value)}
+                            />
+                        </label>
 
-function ExtractedBadge() {
-    return (
-        <span
-            style={{
-                marginLeft: 6,
-                fontSize: 11,
-                padding: "2px 8px",
-                borderRadius: 999,
-                background: "rgba(99,102,241,0.12)",
-                color: "#6366f1",
-                fontWeight: 700,
-                verticalAlign: "middle",
-            }}
-        >
-            extracted
-        </span>
-    );
-}
+                        <label className="hk-label">
+                            Vendor
+                            <input
+                                className="hk-input"
+                                value={editForm.vendor}
+                                onChange={(e) => setEditField("vendor", e.target.value)}
+                            />
+                        </label>
+                    </div>
 
-function ReceiptPreviewModal({ preview, onClose }) {
-    if (!preview) return null;
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label className="hk-label">
+                            Service date *
+                            <input
+                                className="hk-input"
+                                type="date"
+                                value={editForm.serviceDate}
+                                onChange={(e) => setEditField("serviceDate", e.target.value)}
+                            />
+                        </label>
 
-    const isPdf = (preview.mimeType || "").includes("pdf");
+                        <label className="hk-label">
+                            Cost
+                            <input
+                                className="hk-input"
+                                value={editForm.cost}
+                                onChange={(e) => setEditField("cost", e.target.value)}
+                                inputMode="decimal"
+                            />
+                        </label>
+                    </div>
 
-    return (
-        <div
-            className="hk-modal-backdrop"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Receipt preview"
-            onClick={onClose}
-        >
-            <div className="hk-modal" onClick={(e) => e.stopPropagation()}>
-                <div className="hk-row" style={{ marginBottom: 10 }}>
-                    <div style={{ fontWeight: 900 }}>{preview.name || "Receipt preview"}</div>
-                    <button type="button" className="hk-btn" onClick={onClose}>
-                        Close
-                    </button>
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label className="hk-label">
+                            Next due date (reminder)
+                            <input
+                                className="hk-input"
+                                type="date"
+                                value={editForm.nextDueDate}
+                                onChange={(e) => setEditField("nextDueDate", e.target.value)}
+                            />
+                        </label>
+
+                        <label className="hk-label" style={{ display: "grid", gap: 8 }}>
+                            Reminder enabled
+                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!editForm.reminderEnabled}
+                                    onChange={(e) => setEditField("reminderEnabled", e.target.checked)}
+                                />
+                                <span className="hk-muted" style={{ fontSize: 13 }}>
+                                    Include this log in reminders
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+
+                    <label className="hk-label">
+                        Notes
+                        <textarea
+                            className="hk-input"
+                            rows={4}
+                            value={editForm.notes}
+                            onChange={(e) => setEditField("notes", e.target.value)}
+                        />
+                    </label>
+
+                    {editError && <div className="hk-error">{editError}</div>}
+
+                    <div className="hk-actions" style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                        <button className="hk-btn" type="button" onClick={closeEdit} disabled={editSubmitting}>
+                            Cancel
+                        </button>
+                        <button className="hk-btn" type="submit" disabled={editSubmitting}>
+                            {editSubmitting ? "Saving…" : "Save updates"}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
+
+            {/* Receipt create modal (override + create entry) */}
+            <Modal open={receiptCreateOpen} title="Create entry from receipt" onClose={closeReceiptCreate}>
+                <div className="hk-muted" style={{ fontSize: 13, marginBottom: 10 }}>
+                    We scanned your receipt and pre-filled what we could. Override anything, then click “Create entry”.
                 </div>
 
-                {isPdf ? (
-                    <iframe
-                        src={preview.url}
-                        title="Receipt PDF preview"
-                        style={{ width: "100%", height: "70vh", border: "none", borderRadius: 10 }}
-                    />
-                ) : (
-                    <img
-                        src={preview.url}
-                        alt="Receipt preview"
-                        style={{ width: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: 10 }}
-                    />
-                )}
-            </div>
+                {uploadedReceipt ? (
+                    <div className="hk-card hk-card-pad" style={{ marginBottom: 12, background: "rgba(255,255,255,0.04)" }}>
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                            <div style={{ fontWeight: 900 }}>{uploadedReceipt.name}</div>
+                            <Pill>ID: {String(uploadedReceipt.documentId).slice(-6)}</Pill>
+                            {uploadedReceipt.vendor ? <Pill>Vendor: {uploadedReceipt.vendor}</Pill> : null}
+                            {uploadedReceipt.total !== null ? <Pill>Total: {money(uploadedReceipt.total)}</Pill> : null}
+                            {uploadedReceipt.dateISO ? <Pill>Date: {safeDateLabel(uploadedReceipt.dateISO)}</Pill> : null}
+                        </div>
+                        {uploadedReceipt.summary ? (
+                            <div className="hk-muted" style={{ marginTop: 10, fontSize: 13 }}>
+                                {clampStr(uploadedReceipt.summary)}
+                            </div>
+                        ) : null}
+                    </div>
+                ) : null}
+
+                <div className="hk-form">
+                    <label className="hk-label">
+                        Title *
+                        <input
+                            className="hk-input"
+                            value={receiptOverrides.title}
+                            onChange={(e) => setReceiptField("title", e.target.value)}
+                        />
+                    </label>
+
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label className="hk-label">
+                            Category
+                            <input
+                                className="hk-input"
+                                value={receiptOverrides.category}
+                                onChange={(e) => setReceiptField("category", e.target.value)}
+                            />
+                        </label>
+
+                        <label className="hk-label">
+                            Vendor
+                            <input
+                                className="hk-input"
+                                value={receiptOverrides.vendor}
+                                onChange={(e) => setReceiptField("vendor", e.target.value)}
+                            />
+                        </label>
+                    </div>
+
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label className="hk-label">
+                            Service date *
+                            <input
+                                className="hk-input"
+                                type="date"
+                                value={receiptOverrides.serviceDate}
+                                onChange={(e) => setReceiptField("serviceDate", e.target.value)}
+                            />
+                        </label>
+
+                        <label className="hk-label">
+                            Cost
+                            <input
+                                className="hk-input"
+                                value={receiptOverrides.cost}
+                                onChange={(e) => setReceiptField("cost", e.target.value)}
+                                inputMode="decimal"
+                            />
+                        </label>
+                    </div>
+
+                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label className="hk-label">
+                            Next due date (optional)
+                            <input
+                                className="hk-input"
+                                type="date"
+                                value={receiptOverrides.nextDueDate}
+                                onChange={(e) => setReceiptField("nextDueDate", e.target.value)}
+                            />
+                        </label>
+
+                        <label className="hk-label" style={{ display: "grid", gap: 8 }}>
+                            Reminder enabled
+                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!receiptOverrides.reminderEnabled}
+                                    onChange={(e) => setReceiptField("reminderEnabled", e.target.checked)}
+                                />
+                                <span className="hk-muted" style={{ fontSize: 13 }}>
+                                    Include this log in reminders
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+
+                    <label className="hk-label">
+                        Notes
+                        <textarea
+                            className="hk-input"
+                            rows={4}
+                            value={receiptOverrides.notes}
+                            onChange={(e) => setReceiptField("notes", e.target.value)}
+                        />
+                    </label>
+
+                    {receiptCreateError ? <div className="hk-error">{receiptCreateError}</div> : null}
+
+                    <div className="hk-actions" style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                        <button className="hk-btn" type="button" onClick={closeReceiptCreate} disabled={receiptCreateBusy}>
+                            Cancel
+                        </button>
+                        <button className="hk-btn" type="button" onClick={handleCreateLogFromReceipt} disabled={receiptCreateBusy}>
+                            {receiptCreateBusy ? "Creating…" : "Create entry"}
+                        </button>
+                    </div>
+                </div>
+            </Modal>
         </div>
     );
 }

@@ -1,24 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext.jsx";
-import { Link } from "react-router-dom";
 
 export default function PropertiesPage() {
     const { token } = useAuth();
 
-    const [properties, setProperties] = useState([]);
     const [loading, setLoading] = useState(true);
     const [pageError, setPageError] = useState("");
+    const [actionMsg, setActionMsg] = useState("");
+
+    const [properties, setProperties] = useState([]);
 
     const [form, setForm] = useState({
-        nickname: "Princeton House",
-        addressLine1: "",
-        addressLine2: "",
-        city: "Princeton",
+        nickname: "",
+        address: "",
+        city: "",
         province: "BC",
-        postalCode: "",
-        purchaseDate: "",
-        notes: "",
     });
 
     const [submitting, setSubmitting] = useState(false);
@@ -27,17 +25,13 @@ export default function PropertiesPage() {
     async function load() {
         setLoading(true);
         setPageError("");
-
+        setActionMsg("");
         try {
             const res = await api.listProperties(token);
-            const props =
-                res?.data?.properties ||
-                res?.data?.data?.properties ||
-                res?.data?.data?.data?.properties ||
-                [];
-            setProperties(props);
+            const items = res?.data?.properties || res?.data?.items || res?.data || [];
+            setProperties(Array.isArray(items) ? items : []);
         } catch (err) {
-            setPageError(err.message || "Failed to load properties.");
+            setPageError(err?.message || "Failed to load properties.");
         } finally {
             setLoading(false);
         }
@@ -45,52 +39,47 @@ export default function PropertiesPage() {
 
     useEffect(() => {
         load();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     function updateField(key, value) {
         setForm((f) => ({ ...f, [key]: value }));
     }
 
-    async function handleSubmit(e) {
+    async function handleCreate(e) {
         e.preventDefault();
         setFormError("");
+        setActionMsg("");
 
-        if (
-            !form.nickname.trim() ||
-            !form.addressLine1.trim() ||
-            !form.city.trim() ||
-            !form.province.trim()
-        ) {
-            setFormError("Nickname, address line 1, city, and province are required.");
+        if (!form.nickname.trim()) {
+            setFormError("Nickname is required.");
             return;
         }
 
+        const payload = {
+            nickname: form.nickname.trim(),
+            addressLine1: form.address?.trim() || "",
+            city: form.city?.trim() || "",
+            province: form.province?.trim() || "BC",
+        };
+
         setSubmitting(true);
-
         try {
-            await api.createProperty(
-                {
-                    ...form,
-                    purchaseDate: form.purchaseDate ? form.purchaseDate : null,
-                },
-                token
-            );
-
-            setForm((f) => ({
-                ...f,
-                addressLine1: "",
-                addressLine2: "",
-                postalCode: "",
-                notes: "",
-            }));
-
+            await api.createProperty(payload, token);
+            setForm({ nickname: "", address: "", city: "", province: "BC" });
             await load();
+            setActionMsg("Property saved ✅");
         } catch (err) {
-            setFormError(err.message || "Failed to save property.");
+            setFormError(err?.message || "Failed to create property.");
         } finally {
             setSubmitting(false);
         }
     }
+
+    const countLabel = useMemo(() => {
+        const n = properties.length;
+        return `${n} propert${n === 1 ? "y" : "ies"}`;
+    }, [properties.length]);
 
     return (
         <div className="hk-container">
@@ -98,22 +87,37 @@ export default function PropertiesPage() {
                 <div>
                     <h2 className="hk-title">Properties</h2>
                     <p className="hk-subtitle">
-                        Add and manage your properties. Each property can have its own
-                        maintenance logs and documents.
+                        Create a property, then track maintenance logs and receipts.
                     </p>
                 </div>
-                <span className="hk-pill">HomeKeep</span>
+
+                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                    <Link className="hk-link" to="/dashboard">
+                        ← Back to dashboard
+                    </Link>
+                    <button className="hk-btn" type="button" onClick={load} disabled={loading}>
+                        {loading ? "Refreshing…" : "Refresh"}
+                    </button>
+                </div>
             </div>
 
+            {actionMsg && (
+                <div className={actionMsg.includes("✅") ? "hk-muted" : "hk-error"} style={{ marginBottom: 12 }}>
+                    {actionMsg}
+                </div>
+            )}
+
+            {pageError && <div className="hk-error">{pageError}</div>}
+
             <div className="hk-split">
-                {/* Left: Add property */}
+                {/* Left: create property */}
                 <section className="hk-card hk-card-pad">
                     <div className="hk-row" style={{ marginBottom: 10 }}>
-                        <h3 className="hk-section-title">Add a property</h3>
-                        <span className="hk-pill">Required *</span>
+                        <h3 className="hk-section-title">Add property</h3>
+                        <span className="hk-pill">HomeKeep</span>
                     </div>
 
-                    <form onSubmit={handleSubmit} className="hk-form">
+                    <form onSubmit={handleCreate} className="hk-form">
                         <label className="hk-label">
                             Nickname *
                             <input
@@ -125,75 +129,36 @@ export default function PropertiesPage() {
                         </label>
 
                         <label className="hk-label">
-                            Address line 1 *
+                            Address
                             <input
                                 className="hk-input"
-                                value={form.addressLine1}
-                                onChange={(e) => updateField("addressLine1", e.target.value)}
-                                placeholder="e.g., 297 Lachine Avenue"
-                            />
-                        </label>
-
-                        <label className="hk-label">
-                            Address line 2
-                            <input
-                                className="hk-input"
-                                value={form.addressLine2}
-                                onChange={(e) => updateField("addressLine2", e.target.value)}
-                                placeholder="Suite / Unit (optional)"
+                                value={form.address}
+                                onChange={(e) => updateField("address", e.target.value)}
+                                placeholder="Optional"
                             />
                         </label>
 
                         <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
                             <label className="hk-label">
-                                City *
+                                City
                                 <input
                                     className="hk-input"
                                     value={form.city}
                                     onChange={(e) => updateField("city", e.target.value)}
+                                    placeholder="e.g., Princeton"
                                 />
                             </label>
 
                             <label className="hk-label">
-                                Province *
+                                Province
                                 <input
                                     className="hk-input"
                                     value={form.province}
                                     onChange={(e) => updateField("province", e.target.value)}
+                                    placeholder="e.g., BC"
                                 />
                             </label>
                         </div>
-
-                        <label className="hk-label">
-                            Postal code
-                            <input
-                                className="hk-input"
-                                value={form.postalCode}
-                                onChange={(e) => updateField("postalCode", e.target.value)}
-                                placeholder="e.g., V0X 1W0"
-                            />
-                        </label>
-
-                        <label className="hk-label">
-                            Purchase date
-                            <input
-                                className="hk-input"
-                                type="date"
-                                value={form.purchaseDate}
-                                onChange={(e) => updateField("purchaseDate", e.target.value)}
-                            />
-                        </label>
-
-                        <label className="hk-label">
-                            Notes
-                            <textarea
-                                className="hk-textarea"
-                                value={form.notes}
-                                onChange={(e) => updateField("notes", e.target.value)}
-                                rows={3}
-                                placeholder="Anything you want to remember…"
-                            />
-                        </label>
 
                         {formError && <div className="hk-error">{formError}</div>}
 
@@ -201,56 +166,41 @@ export default function PropertiesPage() {
                             <button className="hk-btn" disabled={submitting} type="submit">
                                 {submitting ? "Saving…" : "Save property"}
                             </button>
-                            <span className="hk-muted" style={{ fontSize: 13 }}>
-                                You can add maintenance logs after saving.
-                            </span>
                         </div>
                     </form>
                 </section>
 
-                {/* Right: Your properties */}
+                {/* Right: list */}
                 <section className="hk-card hk-card-pad">
                     <div className="hk-row" style={{ marginBottom: 10 }}>
-                        <h3 className="hk-section-title">Your properties</h3>
-                        <button className="hk-btn" onClick={load} disabled={loading}>
-                            Refresh
-                        </button>
+                        <div>
+                            <h3 className="hk-section-title">Your properties</h3>
+                            <div className="hk-muted" style={{ fontSize: 13 }}>
+                                {countLabel}
+                            </div>
+                        </div>
                     </div>
-
-                    {pageError && <div className="hk-error">{pageError}</div>}
 
                     {loading ? (
                         <div className="hk-muted">Loading…</div>
                     ) : properties.length === 0 ? (
-                        <div className="hk-muted">No properties yet. Add your first one.</div>
+                        <div className="hk-muted">No properties yet.</div>
                     ) : (
-                        <ul className="hk-list" style={{ marginTop: 10 }}>
+                        <ul className="hk-list" style={{ marginTop: 0 }}>
                             {properties.map((p) => (
-                                <li key={p._id} style={{ marginBottom: 14 }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                                <li key={p._id} style={{ marginBottom: 12 }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                                         <div>
                                             <div style={{ fontWeight: 900 }}>{p.nickname}</div>
-                                            <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                {p.addressLine1}
-                                                {p.addressLine2 ? `, ${p.addressLine2}` : ""}, {p.city}, {p.province}{" "}
-                                                {p.postalCode ? p.postalCode : ""}
+                                            <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                {p.city ? `${p.city}, ` : ""}{p.province || ""}
                                             </div>
-
-                                            {p.purchaseDate && (
-                                                <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                    Purchased: {new Date(p.purchaseDate).toLocaleDateString()}
-                                                </div>
-                                            )}
                                         </div>
 
-                                        <div style={{ display: "flex", alignItems: "center" }}>
-                                            <Link className="hk-link" to={`/properties/${p._id}/maintenance`}>
-                                                View maintenance →
-                                            </Link>
-                                        </div>
+                                        <Link className="hk-link" to={`/properties/${p._id}/maintenance`}>
+                                            Open →
+                                        </Link>
                                     </div>
-
-                                    <div className="hk-divider" />
                                 </li>
                             ))}
                         </ul>

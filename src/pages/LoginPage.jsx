@@ -1,55 +1,60 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext.jsx";
 
 export default function LoginPage() {
-    const { login } = useAuth();
     const navigate = useNavigate();
+    const { setSession } = useAuth();
 
-    const [email, setEmail] = useState("tamara@test.com");
-    const [password, setPassword] = useState("Password123!");
-    const [loading, setLoading] = useState(false);
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
+
+    const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
 
     async function handleSubmit(e) {
-        e.preventDefault();
+        e.preventDefault(); // ✅ prevents page refresh
         setError("");
 
-        const trimmedEmail = email.trim();
-
-        if (!trimmedEmail || !password) {
+        const eTrim = email.trim();
+        if (!eTrim || !password) {
             setError("Email and password are required.");
             return;
         }
 
-        setLoading(true);
+        setBusy(true);
         try {
-            await login(trimmedEmail, password);
+            const { user, token } = await api.login(eTrim, password);
+
+            // ✅ Store session in context/localStorage (see AuthContext below)
+            setSession({ user, token });
+
+            // ✅ Navigate somewhere after login
             navigate("/dashboard");
         } catch (err) {
-            setError(err.message || "Login failed.");
+            // ✅ Do NOT clear the fields on error
+            setError(err?.message || "Login failed.");
         } finally {
-            setLoading(false);
+            setBusy(false);
         }
     }
 
     return (
-        <div className="hk-container">
+        <div className="hk-container" style={{ maxWidth: 520 }}>
             <div className="hk-header">
                 <div>
                     <h2 className="hk-title">Log in</h2>
-                    <p className="hk-subtitle">Welcome back 👋</p>
+                    <p className="hk-subtitle">Welcome back to HomeKeep.</p>
                 </div>
-                <span className="hk-pill">HomeKeep</span>
             </div>
 
-            <section className="hk-card hk-card-pad" style={{ maxWidth: 520, margin: "0 auto" }}>
+            <section className="hk-card hk-card-pad">
                 <form onSubmit={handleSubmit} className="hk-form">
                     <label className="hk-label">
                         Email
                         <input
                             className="hk-input"
-                            type="email"
                             autoComplete="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
@@ -65,19 +70,19 @@ export default function LoginPage() {
                             autoComplete="current-password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            placeholder="••••••••"
+                            placeholder="Your password"
                         />
                     </label>
 
-                    {error && <div className="hk-error">{error}</div>}
+                    {error ? <div className="hk-error">{error}</div> : null}
 
                     <div className="hk-actions" style={{ justifyContent: "space-between" }}>
-                        <button className="hk-btn" type="submit" disabled={loading}>
-                            {loading ? "Logging in…" : "Log in"}
+                        <button className="hk-btn" type="submit" disabled={busy}>
+                            {busy ? "Logging in…" : "Log in"}
                         </button>
 
                         <Link className="hk-link" to="/register">
-                            Need an account?
+                            Need an account? Register →
                         </Link>
                     </div>
                 </form>
