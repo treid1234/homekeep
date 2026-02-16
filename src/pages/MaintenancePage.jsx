@@ -1,4 +1,3 @@
-// src/pages/MaintenancePage.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../services/api";
@@ -108,20 +107,10 @@ function Pill({ children }) {
 function normalizeUploadReceiptResponse(res) {
     const data = res?.data || res || {};
 
-    const doc =
-        data.document ||
-        data.receipt ||
-        data.file ||
-        data.upload ||
-        data;
+    const doc = data.document || data.receipt || data.file || data.upload || data;
 
     const documentId =
-        doc?._id ||
-        doc?.id ||
-        data.documentId ||
-        data.receiptId ||
-        data.id ||
-        null;
+        doc?._id || doc?.id || data.documentId || data.receiptId || data.id || null;
 
     const scan =
         data.scan ||
@@ -138,11 +127,7 @@ function normalizeUploadReceiptResponse(res) {
     const total = Number(totalRaw);
     const dateRaw = scan?.date || scan?.serviceDate || data.date || data.receiptDate;
 
-    const summary =
-        scan?.summary ||
-        scan?.textSummary ||
-        data.summary ||
-        "";
+    const summary = scan?.summary || scan?.textSummary || data.summary || "";
 
     const createdAt = doc?.createdAt || data.createdAt || null;
     const name = doc?.originalName || doc?.filename || doc?.name || "Receipt";
@@ -177,24 +162,21 @@ function normalizeDocumentsListResponse(res) {
         data.files ||
         data.receipts ||
         data.results ||
-        data.data?.documents || // if nested oddly
+        data.data?.documents ||
         data.data?.items ||
         data;
 
     const arr = Array.isArray(list) ? list : [];
-    return arr.map((d) => {
-        const id = d?._id || d?.id || d?.documentId || d?.fileId || null;
-        const name =
-            d?.originalName ||
-            d?.filename ||
-            d?.name ||
-            d?.key ||
-            "Document";
-        const createdAt = d?.createdAt || d?.uploadedAt || d?.created || null;
-        const size = d?.size || d?.bytes || null;
-        const kind = d?.kind || d?.type || d?.mimeType || "";
-        return { raw: d, _id: id, name, createdAt, size, kind };
-    }).filter((x) => x._id);
+    return arr
+        .map((d) => {
+            const id = d?._id || d?.id || d?.documentId || d?.fileId || null;
+            const name = d?.originalName || d?.filename || d?.name || d?.key || "Document";
+            const createdAt = d?.createdAt || d?.uploadedAt || d?.created || null;
+            const size = d?.size || d?.bytes || null;
+            const kind = d?.kind || d?.type || d?.mimeType || "";
+            return { raw: d, _id: id, name, createdAt, size, kind };
+        })
+        .filter((x) => x._id);
 }
 
 export default function MaintenancePage() {
@@ -226,6 +208,10 @@ export default function MaintenancePage() {
     // List controls
     const [search, setSearch] = useState("");
     const [sort, setSort] = useState("newest"); // newest|oldest|costHigh|costLow
+
+    // ✅ Pagination (client-side)
+    const [page, setPage] = useState(1); // 1-based
+    const [pageSize, setPageSize] = useState(10);
 
     // Edit modal
     const [editOpen, setEditOpen] = useState(false);
@@ -336,6 +322,43 @@ export default function MaintenancePage() {
 
         return arr;
     }, [logs, search, sort]);
+
+    // ✅ Reset to page 1 whenever filters change or when logs refresh
+    useEffect(() => {
+        setPage(1);
+    }, [search, sort, propertyId, logs.length]);
+
+    const pagination = useMemo(() => {
+        const size = Number(pageSize);
+        const safeSize = Number.isFinite(size) && size > 0 ? size : 10;
+
+        const totalItems = filteredSortedLogs.length;
+        const totalPages = Math.max(1, Math.ceil(totalItems / safeSize));
+
+        const safePage = Math.min(Math.max(1, page), totalPages);
+        const startIdx = (safePage - 1) * safeSize;
+        const endIdx = startIdx + safeSize;
+
+        const items = filteredSortedLogs.slice(startIdx, endIdx);
+
+        const from = totalItems === 0 ? 0 : startIdx + 1;
+        const to = totalItems === 0 ? 0 : Math.min(endIdx, totalItems);
+
+        return {
+            page: safePage,
+            pageSize: safeSize,
+            totalItems,
+            totalPages,
+            from,
+            to,
+            items,
+        };
+    }, [filteredSortedLogs, page, pageSize]);
+
+    useEffect(() => {
+        if (page !== pagination.page) setPage(pagination.page);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pagination.page]);
 
     // ---------- helpers ----------
     function setCreateField(key, value) {
@@ -903,13 +926,65 @@ export default function MaintenancePage() {
 
                 {/* Right: logs list */}
                 <section className="hk-card hk-card-pad">
-                    <div className="hk-row" style={{ marginBottom: 10 }}>
+                    <div className="hk-row" style={{ marginBottom: 10, justifyContent: "space-between", alignItems: "start", gap: 12 }}>
                         <div>
                             <h3 className="hk-section-title">Logs</h3>
                             <div className="hk-muted" style={{ fontSize: 13 }}>
                                 {filteredSortedLogs.length} log{filteredSortedLogs.length === 1 ? "" : "s"} • Total{" "}
                                 {money(totalSpend)}
                             </div>
+                        </div>
+
+                        {/* ✅ Pagination controls (top) */}
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                            <span className="hk-muted" style={{ fontSize: 12 }}>
+                                Showing <strong>{pagination.from}</strong>–<strong>{pagination.to}</strong> of{" "}
+                                <strong>{pagination.totalItems}</strong>
+                            </span>
+
+                            <label className="hk-muted" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                                Page size
+                                <select
+                                    className="hk-input"
+                                    style={{ width: 110 }}
+                                    value={pageSize}
+                                    onChange={(e) => {
+                                        const n = Number(e.target.value);
+                                        setPageSize(Number.isFinite(n) && n > 0 ? n : 10);
+                                        setPage(1);
+                                    }}
+                                    aria-label="Page size"
+                                >
+                                    <option value={5}>5</option>
+                                    <option value={10}>10</option>
+                                    <option value={20}>20</option>
+                                    <option value={50}>50</option>
+                                </select>
+                            </label>
+
+                            <button
+                                className="hk-btn hk-btn-ghost hk-btn-sm"
+                                type="button"
+                                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                                disabled={pagination.page <= 1}
+                                aria-label="Previous page"
+                            >
+                                ← Prev
+                            </button>
+
+                            <span className="hk-muted" style={{ fontSize: 12 }}>
+                                Page <strong>{pagination.page}</strong> / <strong>{pagination.totalPages}</strong>
+                            </span>
+
+                            <button
+                                className="hk-btn hk-btn-ghost hk-btn-sm"
+                                type="button"
+                                onClick={() => setPage((p) => Math.min(pagination.totalPages, p + 1))}
+                                disabled={pagination.page >= pagination.totalPages}
+                                aria-label="Next page"
+                            >
+                                Next →
+                            </button>
                         </div>
                     </div>
 
@@ -933,135 +1008,169 @@ export default function MaintenancePage() {
                     ) : filteredSortedLogs.length === 0 ? (
                         <div className="hk-muted">No logs found.</div>
                     ) : (
-                        <ul className="hk-list" style={{ marginTop: 0 }}>
-                            {filteredSortedLogs.map((log) => {
-                                const logId = log?._id;
-                                const docsOpen = !!docsOpenByLogId[logId];
-                                const docsLoading = !!docsLoadingByLogId[logId];
-                                const docsErr = docsErrorByLogId[logId] || "";
-                                const docs = Array.isArray(docsByLogId[logId]) ? docsByLogId[logId] : [];
-                                const docCountLabel = docsOpen ? "Hide receipts" : `Show receipts (${docs.length || 0})`;
+                        <>
+                            <ul className="hk-list" style={{ marginTop: 0 }}>
+                                {pagination.items.map((log) => {
+                                    const logId = log?._id;
+                                    const docsOpen = !!docsOpenByLogId[logId];
+                                    const docsLoading = !!docsLoadingByLogId[logId];
+                                    const docsErr = docsErrorByLogId[logId] || "";
+                                    const docs = Array.isArray(docsByLogId[logId]) ? docsByLogId[logId] : [];
+                                    const docCountLabel = docsOpen ? "Hide receipts" : `Show receipts (${docs.length || 0})`;
 
-                                return (
-                                    <li key={logId} style={{ marginBottom: 12 }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
-                                            <div style={{ flex: 1 }}>
-                                                <div style={{ fontWeight: 900 }}>{log.title}</div>
-                                                <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                    {log.category ? `${log.category} • ` : ""}
-                                                    {log.vendor ? `${log.vendor} • ` : ""}
-                                                    {log.serviceDate ? safeDateLabel(log.serviceDate) : ""}
-                                                    {log.nextDueDate ? ` • Next due: ${safeDateLabel(log.nextDueDate)}` : ""}
-                                                    {typeof log.reminderEnabled === "boolean"
-                                                        ? ` • Reminders: ${log.reminderEnabled ? "On" : "Off"}`
-                                                        : ""}
-                                                </div>
-                                                {log.notes ? (
-                                                    <div className="hk-muted" style={{ fontSize: 13, marginTop: 6 }}>
-                                                        {log.notes}
+                                    return (
+                                        <li key={logId} style={{ marginBottom: 12 }}>
+                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                                                <div style={{ flex: 1 }}>
+                                                    <div style={{ fontWeight: 900 }}>{log.title}</div>
+                                                    <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                        {log.category ? `${log.category} • ` : ""}
+                                                        {log.vendor ? `${log.vendor} • ` : ""}
+                                                        {log.serviceDate ? safeDateLabel(log.serviceDate) : ""}
+                                                        {log.nextDueDate ? ` • Next due: ${safeDateLabel(log.nextDueDate)}` : ""}
+                                                        {typeof log.reminderEnabled === "boolean"
+                                                            ? ` • Reminders: ${log.reminderEnabled ? "On" : "Off"}`
+                                                            : ""}
                                                     </div>
-                                                ) : null}
-
-                                                {/* Receipts/documents section */}
-                                                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                                                    <button className="hk-btn" type="button" onClick={() => toggleDocs(logId)}>
-                                                        {docCountLabel}
-                                                    </button>
-
-                                                    {/* Upload + attach receipt directly to this log */}
-                                                    <input
-                                                        ref={(el) => {
-                                                            if (el) attachFileRefs.current[logId] = el;
-                                                        }}
-                                                        type="file"
-                                                        accept="application/pdf,image/*"
-                                                        style={{ display: "none" }}
-                                                        onChange={(e) => {
-                                                            const file = e.target.files?.[0];
-                                                            if (!file) return;
-                                                            handleUploadAndAttachToLog(logId, file);
-                                                        }}
-                                                    />
-                                                    <button
-                                                        className="hk-btn"
-                                                        type="button"
-                                                        onClick={() => attachFileRefs.current?.[logId]?.click()}
-                                                        disabled={docsLoading}
-                                                    >
-                                                        Upload & attach receipt
-                                                    </button>
-
-                                                    {docsLoading ? <span className="hk-muted" style={{ fontSize: 12 }}>Working…</span> : null}
-                                                </div>
-
-                                                {docsOpen ? (
-                                                    <div className="hk-card hk-card-pad" style={{ marginTop: 10, background: "rgba(255,255,255,0.04)" }}>
-                                                        <div style={{ fontWeight: 900, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
-                                                            <span>Receipts / documents</span>
-                                                            <span className="hk-muted" style={{ fontSize: 12 }}>
-                                                                {docsLoading ? "Loading…" : `${docs.length} file${docs.length === 1 ? "" : "s"}`}
-                                                            </span>
-                                                            <button className="hk-btn" type="button" onClick={() => loadDocsForLog(logId)} disabled={docsLoading}>
-                                                                Refresh
-                                                            </button>
+                                                    {log.notes ? (
+                                                        <div className="hk-muted" style={{ fontSize: 13, marginTop: 6 }}>
+                                                            {log.notes}
                                                         </div>
+                                                    ) : null}
 
-                                                        {docsErr ? <div className="hk-error" style={{ marginBottom: 8 }}>{docsErr}</div> : null}
+                                                    {/* Receipts/documents section */}
+                                                    <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                                                        <button className="hk-btn" type="button" onClick={() => toggleDocs(logId)}>
+                                                            {docCountLabel}
+                                                        </button>
 
-                                                        {!docsLoading && docs.length === 0 ? (
-                                                            <div className="hk-muted" style={{ fontSize: 13 }}>
-                                                                No receipts/documents attached to this log yet.
+                                                        {/* Upload + attach receipt directly to this log */}
+                                                        <input
+                                                            ref={(el) => {
+                                                                if (el) attachFileRefs.current[logId] = el;
+                                                            }}
+                                                            type="file"
+                                                            accept="application/pdf,image/*"
+                                                            style={{ display: "none" }}
+                                                            onChange={(e) => {
+                                                                const file = e.target.files?.[0];
+                                                                if (!file) return;
+                                                                handleUploadAndAttachToLog(logId, file);
+                                                            }}
+                                                        />
+                                                        <button
+                                                            className="hk-btn"
+                                                            type="button"
+                                                            onClick={() => attachFileRefs.current?.[logId]?.click()}
+                                                            disabled={docsLoading}
+                                                        >
+                                                            Upload & attach receipt
+                                                        </button>
+
+                                                        {docsLoading ? <span className="hk-muted" style={{ fontSize: 12 }}>Working…</span> : null}
+                                                    </div>
+
+                                                    {docsOpen ? (
+                                                        <div className="hk-card hk-card-pad" style={{ marginTop: 10, background: "rgba(255,255,255,0.04)" }}>
+                                                            <div style={{ fontWeight: 900, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+                                                                <span>Receipts / documents</span>
+                                                                <span className="hk-muted" style={{ fontSize: 12 }}>
+                                                                    {docsLoading ? "Loading…" : `${docs.length} file${docs.length === 1 ? "" : "s"}`}
+                                                                </span>
+                                                                <button className="hk-btn" type="button" onClick={() => loadDocsForLog(logId)} disabled={docsLoading}>
+                                                                    Refresh
+                                                                </button>
                                                             </div>
-                                                        ) : (
-                                                            <ul className="hk-list" style={{ marginTop: 0 }}>
-                                                                {docs.map((d) => (
-                                                                    <li key={d._id} style={{ marginBottom: 10 }}>
-                                                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "start" }}>
-                                                                            <div>
-                                                                                <div style={{ fontWeight: 900 }}>{d.name}</div>
-                                                                                <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                                                    {d.kind ? `${d.kind} • ` : ""}
-                                                                                    {d.createdAt ? `Uploaded: ${safeTimeLabel(d.createdAt)}` : ""}
+
+                                                            {docsErr ? <div className="hk-error" style={{ marginBottom: 8 }}>{docsErr}</div> : null}
+
+                                                            {!docsLoading && docs.length === 0 ? (
+                                                                <div className="hk-muted" style={{ fontSize: 13 }}>
+                                                                    No receipts/documents attached to this log yet.
+                                                                </div>
+                                                            ) : (
+                                                                <ul className="hk-list" style={{ marginTop: 0 }}>
+                                                                    {docs.map((d) => (
+                                                                        <li key={d._id} style={{ marginBottom: 10 }}>
+                                                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "start" }}>
+                                                                                <div>
+                                                                                    <div style={{ fontWeight: 900 }}>{d.name}</div>
+                                                                                    <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                                                        {d.kind ? `${d.kind} • ` : ""}
+                                                                                        {d.createdAt ? `Uploaded: ${safeTimeLabel(d.createdAt)}` : ""}
+                                                                                    </div>
+                                                                                </div>
+
+                                                                                <div style={{ display: "flex", gap: 10 }}>
+                                                                                    <button className="hk-btn" type="button" onClick={() => handleDownloadDoc(logId, d._id)}>
+                                                                                        Download
+                                                                                    </button>
+                                                                                    <button className="hk-btn" type="button" onClick={() => handleDeleteDoc(logId, d._id)}>
+                                                                                        Delete
+                                                                                    </button>
                                                                                 </div>
                                                                             </div>
+                                                                        </li>
+                                                                    ))}
+                                                                </ul>
+                                                            )}
 
-                                                                            <div style={{ display: "flex", gap: 10 }}>
-                                                                                <button className="hk-btn" type="button" onClick={() => handleDownloadDoc(logId, d._id)}>
-                                                                                    Download
-                                                                                </button>
-                                                                                <button className="hk-btn" type="button" onClick={() => handleDeleteDoc(logId, d._id)}>
-                                                                                    Delete
-                                                                                </button>
-                                                                            </div>
-                                                                        </div>
-                                                                    </li>
-                                                                ))}
-                                                            </ul>
-                                                        )}
-
-                                                        <div className="hk-muted" style={{ fontSize: 12, marginTop: 8 }}>
-                                                            If this section stays empty even when you know receipts exist, paste the raw JSON from the documents endpoint and we’ll adjust the normalizer.
+                                                            <div className="hk-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                                                                If this section stays empty even when you know receipts exist, paste the raw JSON from the documents endpoint and we’ll adjust the normalizer.
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                ) : null}
-                                            </div>
+                                                    ) : null}
+                                                </div>
 
-                                            <div style={{ display: "grid", gap: 8, justifyItems: "end" }}>
-                                                <div style={{ fontWeight: 900 }}>{money(log.cost)}</div>
-                                                <div style={{ display: "flex", gap: 10 }}>
-                                                    <button className="hk-btn" type="button" onClick={() => openEdit(log)}>
-                                                        Edit
-                                                    </button>
-                                                    <button className="hk-btn" type="button" onClick={() => handleDelete(logId)}>
-                                                        Delete
-                                                    </button>
+                                                <div style={{ display: "grid", gap: 8, justifyItems: "end" }}>
+                                                    <div style={{ fontWeight: 900 }}>{money(log.cost)}</div>
+                                                    <div style={{ display: "flex", gap: 10 }}>
+                                                        <button className="hk-btn" type="button" onClick={() => openEdit(log)}>
+                                                            Edit
+                                                        </button>
+                                                        <button className="hk-btn" type="button" onClick={() => handleDelete(logId)}>
+                                                            Delete
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    </li>
-                                );
-                            })}
-                        </ul>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+
+                            {/* ✅ Pagination controls (bottom, helpful if list is long) */}
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                                <span className="hk-muted" style={{ fontSize: 12 }}>
+                                    Showing <strong>{pagination.from}</strong>–<strong>{pagination.to}</strong> of{" "}
+                                    <strong>{pagination.totalItems}</strong>
+                                </span>
+
+                                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                    <button
+                                        className="hk-btn hk-btn-ghost hk-btn-sm"
+                                        type="button"
+                                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                                        disabled={pagination.page <= 1}
+                                    >
+                                        ← Prev
+                                    </button>
+
+                                    <span className="hk-muted" style={{ fontSize: 12 }}>
+                                        Page <strong>{pagination.page}</strong> / <strong>{pagination.totalPages}</strong>
+                                    </span>
+
+                                    <button
+                                        className="hk-btn hk-btn-ghost hk-btn-sm"
+                                        type="button"
+                                        onClick={() => setPage((p) => Math.min(pagination.totalPages, p + 1))}
+                                        disabled={pagination.page >= pagination.totalPages}
+                                    >
+                                        Next →
+                                    </button>
+                                </div>
+                            </div>
+                        </>
                     )}
                 </section>
             </div>
