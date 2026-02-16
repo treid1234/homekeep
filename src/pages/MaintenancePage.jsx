@@ -1,3 +1,4 @@
+// src/pages/MaintenancePage.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../services/api";
@@ -105,7 +106,6 @@ function Pill({ children }) {
  * We try a bunch of likely locations so you don't have to match one exact format.
  */
 function normalizeUploadReceiptResponse(res) {
-    // res could be: {success, data:{document, scan}} or {success,data:{documentId, extracted}} etc
     const data = res?.data || res || {};
 
     const doc =
@@ -165,6 +165,38 @@ function normalizeUploadReceiptResponse(res) {
     };
 }
 
+/**
+ * Documents list normalization (for per-log receipts).
+ * Supports a wide range of backend responses.
+ */
+function normalizeDocumentsListResponse(res) {
+    const data = res?.data || res || {};
+    const list =
+        data.documents ||
+        data.items ||
+        data.files ||
+        data.receipts ||
+        data.results ||
+        data.data?.documents || // if nested oddly
+        data.data?.items ||
+        data;
+
+    const arr = Array.isArray(list) ? list : [];
+    return arr.map((d) => {
+        const id = d?._id || d?.id || d?.documentId || d?.fileId || null;
+        const name =
+            d?.originalName ||
+            d?.filename ||
+            d?.name ||
+            d?.key ||
+            "Document";
+        const createdAt = d?.createdAt || d?.uploadedAt || d?.created || null;
+        const size = d?.size || d?.bytes || null;
+        const kind = d?.kind || d?.type || d?.mimeType || "";
+        return { raw: d, _id: id, name, createdAt, size, kind };
+    }).filter((x) => x._id);
+}
+
 export default function MaintenancePage() {
     const { token } = useAuth();
     const { propertyId } = useParams();
@@ -221,7 +253,7 @@ export default function MaintenancePage() {
     const [receiptCreateBusy, setReceiptCreateBusy] = useState(false);
     const [receiptCreateError, setReceiptCreateError] = useState("");
 
-    const [uploadedReceipt, setUploadedReceipt] = useState(null); // normalized {documentId, vendor, total, dateISO, ...}
+    const [uploadedReceipt, setUploadedReceipt] = useState(null); // normalized
     const [receiptOverrides, setReceiptOverrides] = useState({
         title: "",
         category: "General",
@@ -232,6 +264,15 @@ export default function MaintenancePage() {
         nextDueDate: "",
         reminderEnabled: true,
     });
+
+    // ---------- per-log documents (receipts) ----------
+    const [docsOpenByLogId, setDocsOpenByLogId] = useState({});
+    const [docsByLogId, setDocsByLogId] = useState({});
+    const [docsLoadingByLogId, setDocsLoadingByLogId] = useState({});
+    const [docsErrorByLogId, setDocsErrorByLogId] = useState({});
+
+    // Hidden file input per-log for upload+attach
+    const attachFileRefs = useRef({}); // { [logId]: HTMLInputElement }
 
     // ---------- load logs ----------
     async function loadLogs() {
@@ -365,7 +406,6 @@ export default function MaintenancePage() {
 
         setCreating(true);
         try {
-            // matches your api.js: createMaintenance(propertyId, payload, token)
             await api.createMaintenance(propertyId, payload, token);
 
             setCreateForm({
@@ -455,7 +495,7 @@ export default function MaintenancePage() {
         }
     }
 
-    // ---------- RECEIPT FLOW (restored): Upload receipt -> Scan -> Open override modal -> Create log ----------
+    // ---------- RECEIPT FLOW: Upload receipt -> Scan -> Open override modal -> Create log ----------
     async function handleUploadReceiptFile(file) {
         setReceiptUploading(true);
         setReceiptUploadError("");
@@ -468,9 +508,7 @@ export default function MaintenancePage() {
             const normalized = normalizeUploadReceiptResponse(res);
 
             if (!normalized.documentId) {
-                throw new Error(
-                    "Receipt uploaded but no documentId returned. Check backend uploadReceipt response."
-                );
+                throw new Error("Receipt uploaded but no documentId returned. Check backend uploadReceipt response.");
             }
 
             setUploadedReceipt(normalized);
@@ -561,6 +599,105 @@ export default function MaintenancePage() {
         }
     }
 
+    // ---------- Per-log receipts/documents ----------
+    async function loadDocsForLog(logId) {
+        if (!logId) return;
+
+        setDocsLoadingByLogId((m) => ({ ...m, [logId]: true }));
+        setDocsErrorByLogId((m) => ({ ...m, [logId]: "" }));
+
+        try {
+            const res = await api.listMaintenanceDocuments(propertyId, logId, token);
+            const docs = normalizeDocumentsListResponse(res);
+            setDocsByLogId((m) => ({ ...m, [logId]: docs }));
+        } catch (err) {
+            setDocsErrorByLogId((m) => ({ ...m, [logId]: err?.message || "Failed to load receipts/documents." }));
+            setDocsByLogId((m) => ({ ...m, [logId]: [] }));
+        } finally {
+            setDocsLoadingByLogId((m) => ({ ...m, [logId]: false }));
+        }
+    }
+
+    async function toggleDocs(logId) {
+        setDocsOpenByLogId((m) => {
+            const next = !m[logId];
+            return { ...m, [logId]: next };
+        });
+
+        const alreadyLoaded = Array.isArray(docsByLogId[logId]);
+        if (!alreadyLoaded) {
+            await loadDocsForLog(logId);
+        }
+    }
+
+    async function handleDownloadDoc(logId, documentId) {
+        setActionMsg("");
+        setPageError("");
+        try {
+            const { blob, filename } = await api.downloadMaintenanceDocument(propertyId, logId, documentId, token);
+
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename || "document";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            setPageError(err?.message || "Failed to download document.");
+        }
+    }
+
+    async function handleDeleteDoc(logId, documentId) {
+        const ok = window.confirm("Delete this receipt/document? This cannot be undone.");
+        if (!ok) return;
+
+        setActionMsg("");
+        setPageError("");
+
+        try {
+            await api.deleteMaintenanceDocument(propertyId, logId, documentId, token);
+            setActionMsg("Receipt/document deleted ✅");
+            await loadDocsForLog(logId);
+        } catch (err) {
+            setPageError(err?.message || "Failed to delete document.");
+        }
+    }
+
+    async function handleUploadAndAttachToLog(logId, file) {
+        if (!logId || !file) return;
+
+        setActionMsg("");
+        setPageError("");
+        setDocsErrorByLogId((m) => ({ ...m, [logId]: "" }));
+        setDocsLoadingByLogId((m) => ({ ...m, [logId]: true }));
+
+        try {
+            // 1) upload
+            const up = await api.uploadReceipt(file, token);
+            const normalized = normalizeUploadReceiptResponse(up);
+            if (!normalized.documentId) throw new Error("Upload succeeded but no documentId returned.");
+
+            // 2) attach
+            await api.attachReceipt(normalized.documentId, propertyId, logId, token);
+
+            setActionMsg("Receipt uploaded + attached ✅");
+
+            // 3) make sure docs UI is open + refreshed
+            setDocsOpenByLogId((m) => ({ ...m, [logId]: true }));
+            await loadDocsForLog(logId);
+        } catch (err) {
+            setDocsErrorByLogId((m) => ({ ...m, [logId]: err?.message || "Failed to upload/attach receipt." }));
+        } finally {
+            setDocsLoadingByLogId((m) => ({ ...m, [logId]: false }));
+
+            // reset hidden file input
+            const ref = attachFileRefs.current?.[logId];
+            if (ref) ref.value = "";
+        }
+    }
+
     return (
         <div className="hk-container">
             <div className="hk-header">
@@ -589,7 +726,7 @@ export default function MaintenancePage() {
             )}
             {pageError && <div className="hk-error">{pageError}</div>}
 
-            {/* ✅ RESTORED: Upload receipt -> scan -> create entry */}
+            {/* Upload receipt -> scan -> create entry */}
             <div className="hk-card hk-card-pad" style={{ marginBottom: 12 }}>
                 <div className="hk-row" style={{ marginBottom: 10 }}>
                     <div>
@@ -797,41 +934,133 @@ export default function MaintenancePage() {
                         <div className="hk-muted">No logs found.</div>
                     ) : (
                         <ul className="hk-list" style={{ marginTop: 0 }}>
-                            {filteredSortedLogs.map((log) => (
-                                <li key={log._id} style={{ marginBottom: 12 }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
-                                        <div>
-                                            <div style={{ fontWeight: 900 }}>{log.title}</div>
-                                            <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                {log.category ? `${log.category} • ` : ""}
-                                                {log.vendor ? `${log.vendor} • ` : ""}
-                                                {log.serviceDate ? safeDateLabel(log.serviceDate) : ""}
-                                                {log.nextDueDate ? ` • Next due: ${safeDateLabel(log.nextDueDate)}` : ""}
-                                                {typeof log.reminderEnabled === "boolean"
-                                                    ? ` • Reminders: ${log.reminderEnabled ? "On" : "Off"}`
-                                                    : ""}
-                                            </div>
-                                            {log.notes ? (
-                                                <div className="hk-muted" style={{ fontSize: 13, marginTop: 6 }}>
-                                                    {log.notes}
-                                                </div>
-                                            ) : null}
-                                        </div>
+                            {filteredSortedLogs.map((log) => {
+                                const logId = log?._id;
+                                const docsOpen = !!docsOpenByLogId[logId];
+                                const docsLoading = !!docsLoadingByLogId[logId];
+                                const docsErr = docsErrorByLogId[logId] || "";
+                                const docs = Array.isArray(docsByLogId[logId]) ? docsByLogId[logId] : [];
+                                const docCountLabel = docsOpen ? "Hide receipts" : `Show receipts (${docs.length || 0})`;
 
-                                        <div style={{ display: "grid", gap: 8, justifyItems: "end" }}>
-                                            <div style={{ fontWeight: 900 }}>{money(log.cost)}</div>
-                                            <div style={{ display: "flex", gap: 10 }}>
-                                                <button className="hk-btn" type="button" onClick={() => openEdit(log)}>
-                                                    Edit
-                                                </button>
-                                                <button className="hk-btn" type="button" onClick={() => handleDelete(log._id)}>
-                                                    Delete
-                                                </button>
+                                return (
+                                    <li key={logId} style={{ marginBottom: 12 }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontWeight: 900 }}>{log.title}</div>
+                                                <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                    {log.category ? `${log.category} • ` : ""}
+                                                    {log.vendor ? `${log.vendor} • ` : ""}
+                                                    {log.serviceDate ? safeDateLabel(log.serviceDate) : ""}
+                                                    {log.nextDueDate ? ` • Next due: ${safeDateLabel(log.nextDueDate)}` : ""}
+                                                    {typeof log.reminderEnabled === "boolean"
+                                                        ? ` • Reminders: ${log.reminderEnabled ? "On" : "Off"}`
+                                                        : ""}
+                                                </div>
+                                                {log.notes ? (
+                                                    <div className="hk-muted" style={{ fontSize: 13, marginTop: 6 }}>
+                                                        {log.notes}
+                                                    </div>
+                                                ) : null}
+
+                                                {/* Receipts/documents section */}
+                                                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                                                    <button className="hk-btn" type="button" onClick={() => toggleDocs(logId)}>
+                                                        {docCountLabel}
+                                                    </button>
+
+                                                    {/* Upload + attach receipt directly to this log */}
+                                                    <input
+                                                        ref={(el) => {
+                                                            if (el) attachFileRefs.current[logId] = el;
+                                                        }}
+                                                        type="file"
+                                                        accept="application/pdf,image/*"
+                                                        style={{ display: "none" }}
+                                                        onChange={(e) => {
+                                                            const file = e.target.files?.[0];
+                                                            if (!file) return;
+                                                            handleUploadAndAttachToLog(logId, file);
+                                                        }}
+                                                    />
+                                                    <button
+                                                        className="hk-btn"
+                                                        type="button"
+                                                        onClick={() => attachFileRefs.current?.[logId]?.click()}
+                                                        disabled={docsLoading}
+                                                    >
+                                                        Upload & attach receipt
+                                                    </button>
+
+                                                    {docsLoading ? <span className="hk-muted" style={{ fontSize: 12 }}>Working…</span> : null}
+                                                </div>
+
+                                                {docsOpen ? (
+                                                    <div className="hk-card hk-card-pad" style={{ marginTop: 10, background: "rgba(255,255,255,0.04)" }}>
+                                                        <div style={{ fontWeight: 900, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+                                                            <span>Receipts / documents</span>
+                                                            <span className="hk-muted" style={{ fontSize: 12 }}>
+                                                                {docsLoading ? "Loading…" : `${docs.length} file${docs.length === 1 ? "" : "s"}`}
+                                                            </span>
+                                                            <button className="hk-btn" type="button" onClick={() => loadDocsForLog(logId)} disabled={docsLoading}>
+                                                                Refresh
+                                                            </button>
+                                                        </div>
+
+                                                        {docsErr ? <div className="hk-error" style={{ marginBottom: 8 }}>{docsErr}</div> : null}
+
+                                                        {!docsLoading && docs.length === 0 ? (
+                                                            <div className="hk-muted" style={{ fontSize: 13 }}>
+                                                                No receipts/documents attached to this log yet.
+                                                            </div>
+                                                        ) : (
+                                                            <ul className="hk-list" style={{ marginTop: 0 }}>
+                                                                {docs.map((d) => (
+                                                                    <li key={d._id} style={{ marginBottom: 10 }}>
+                                                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "start" }}>
+                                                                            <div>
+                                                                                <div style={{ fontWeight: 900 }}>{d.name}</div>
+                                                                                <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                                                    {d.kind ? `${d.kind} • ` : ""}
+                                                                                    {d.createdAt ? `Uploaded: ${safeTimeLabel(d.createdAt)}` : ""}
+                                                                                </div>
+                                                                            </div>
+
+                                                                            <div style={{ display: "flex", gap: 10 }}>
+                                                                                <button className="hk-btn" type="button" onClick={() => handleDownloadDoc(logId, d._id)}>
+                                                                                    Download
+                                                                                </button>
+                                                                                <button className="hk-btn" type="button" onClick={() => handleDeleteDoc(logId, d._id)}>
+                                                                                    Delete
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        )}
+
+                                                        <div className="hk-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                                                            If this section stays empty even when you know receipts exist, paste the raw JSON from the documents endpoint and we’ll adjust the normalizer.
+                                                        </div>
+                                                    </div>
+                                                ) : null}
+                                            </div>
+
+                                            <div style={{ display: "grid", gap: 8, justifyItems: "end" }}>
+                                                <div style={{ fontWeight: 900 }}>{money(log.cost)}</div>
+                                                <div style={{ display: "flex", gap: 10 }}>
+                                                    <button className="hk-btn" type="button" onClick={() => openEdit(log)}>
+                                                        Edit
+                                                    </button>
+                                                    <button className="hk-btn" type="button" onClick={() => handleDelete(logId)}>
+                                                        Delete
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
-                                </li>
-                            ))}
+                                    </li>
+                                );
+                            })}
                         </ul>
                     )}
                 </section>
@@ -1066,3 +1295,4 @@ export default function MaintenancePage() {
         </div>
     );
 }
+

@@ -1,12 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext.jsx";
-
-function money(n) {
-    const num = typeof n === "number" && Number.isFinite(n) ? n : 0;
-    return num.toLocaleString(undefined, { style: "currency", currency: "CAD" });
-}
 
 function safeDateLabel(d) {
     if (!d) return "";
@@ -15,34 +10,243 @@ function safeDateLabel(d) {
     return dt.toLocaleDateString();
 }
 
-function getMonthNameFromISODate(isoDate) {
-    if (!isoDate) return "";
-    const dt = new Date(`${isoDate}T00:00:00.000Z`);
-    if (Number.isNaN(dt.getTime())) return "";
-    return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+function money(n) {
+    const num = typeof n === "number" && Number.isFinite(n) ? n : 0;
+    return num.toLocaleString(undefined, { style: "currency", currency: "CAD" });
 }
 
-function reminderBadge(reminderStatus, dueInDays) {
-    const base = {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "4px 10px",
-        borderRadius: 999,
-        fontSize: 12,
-        fontWeight: 800,
-        border: "1px solid rgba(255,255,255,0.14)",
-        background: "rgba(255,255,255,0.06)",
-        whiteSpace: "nowrap",
+function pickDashboardData(s) {
+    // supports:
+    // 1) { success:true, data:{...} }
+    // 2) older shapes where fields are at root
+    return s?.data?.data || s?.data || s || null;
+}
+
+function exportCSV(filename, rows) {
+    const safe = Array.isArray(rows) ? rows : [];
+    if (safe.length === 0) return;
+
+    const headers = Object.keys(safe[0]);
+    const escape = (v) => {
+        const s = v === null || v === undefined ? "" : String(v);
+        const needs = /[",\n]/.test(s);
+        const cleaned = s.replace(/"/g, '""');
+        return needs ? `"${cleaned}"` : cleaned;
     };
 
-    if (reminderStatus === "overdue") {
-        return { ...base, border: "1px solid rgba(255, 80, 80, 0.35)", background: "rgba(255, 80, 80, 0.10)" };
+    const lines = [headers.join(","), ...safe.map((r) => headers.map((h) => escape(r[h])).join(","))];
+
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+}
+
+function Modal({ open, title, children, onClose }) {
+    if (!open) return null;
+    return (
+        <div
+            role="dialog"
+            aria-modal="true"
+            onClick={onClose}
+            style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.55)",
+                display: "grid",
+                placeItems: "center",
+                padding: 16,
+                zIndex: 9999,
+            }}
+        >
+            <div
+                className="hk-card hk-card-pad"
+                onClick={(e) => e.stopPropagation()}
+                style={{ width: "min(980px, 96vw)", maxHeight: "86vh", overflow: "auto" }}
+            >
+                <div className="hk-row" style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", gap: 12 }}>
+                    <div style={{ fontWeight: 900, fontSize: 16 }}>{title}</div>
+                    <button className="hk-btn hk-btn-ghost hk-btn-sm" type="button" onClick={onClose}>
+                        ✕
+                    </button>
+                </div>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+async function runWithLimit(items, limit, worker) {
+    const results = [];
+    const queue = [...items];
+    const running = new Set();
+
+    async function launchOne() {
+        const item = queue.shift();
+        if (!item) return;
+        const p = Promise.resolve().then(() => worker(item));
+        running.add(p);
+
+        try {
+            const r = await p;
+            results.push(r);
+        } finally {
+            running.delete(p);
+        }
     }
-    if (reminderStatus === "dueSoon") {
-        return { ...base, border: "1px solid rgba(255, 200, 80, 0.35)", background: "rgba(255, 200, 80, 0.10)" };
+
+    while (queue.length > 0 || running.size > 0) {
+        while (queue.length > 0 && running.size < limit) {
+            // eslint-disable-next-line no-await-in-loop
+            await launchOne();
+        }
+        if (running.size > 0) {
+            // eslint-disable-next-line no-await-in-loop
+            await Promise.race(Array.from(running));
+        }
     }
-    return { ...base, border: "1px solid rgba(120, 255, 180, 0.35)", background: "rgba(120, 255, 180, 0.10)" };
+
+    return results;
+}
+
+// ---------- Daily spend chart helpers ----------
+function isoDateUTC(d) {
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+}
+
+function startOfDayUTC(d) {
+    const dt = new Date(d);
+    return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()));
+}
+
+function addDaysUTC(date, days) {
+    const d = new Date(date);
+    d.setUTCDate(d.getUTCDate() + days);
+    return d;
+}
+
+function buildDailySeries(windowDays, dailySpend) {
+    const wd = Number(windowDays);
+    const safeDays = Number.isFinite(wd) ? Math.min(Math.max(wd, 7), 365) : 30;
+
+    const now = new Date();
+    const end = startOfDayUTC(now);
+    const start = startOfDayUTC(addDaysUTC(end, -safeDays + 1));
+
+    const map = new Map();
+    (Array.isArray(dailySpend) ? dailySpend : []).forEach((x) => {
+        const key = x?.date;
+        const total = typeof x?.total === "number" ? x.total : 0;
+        if (key) map.set(key, total);
+    });
+
+    const out = [];
+    for (let i = 0; i < safeDays; i += 1) {
+        const day = addDaysUTC(start, i);
+        const key = isoDateUTC(day);
+        out.push({ date: key, total: map.get(key) || 0 });
+    }
+    return out;
+}
+
+function Sparkline({ data, height = 140 }) {
+    const w = 900; // virtual width, scales via viewBox
+    const h = Math.max(90, Number(height) || 140);
+    const pad = 12;
+
+    const max = data.reduce((m, p) => Math.max(m, p.total || 0), 0);
+    const min = data.reduce((m, p) => Math.min(m, p.total || 0), Number.POSITIVE_INFINITY);
+    const safeMin = Number.isFinite(min) ? min : 0;
+    const safeMax = Number.isFinite(max) ? max : 0;
+
+    const range = Math.max(1, safeMax - safeMin);
+
+    const xStep = data.length > 1 ? (w - pad * 2) / (data.length - 1) : 0;
+
+    const points = data.map((p, i) => {
+        const x = pad + i * xStep;
+        const y = pad + (h - pad * 2) * (1 - (Number(p.total || 0) - safeMin) / range);
+        return { x, y, total: Number(p.total || 0), date: p.date };
+    });
+
+    const d = points
+        .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+        .join(" ");
+
+    const area = `${d} L ${(pad + (data.length - 1) * xStep).toFixed(2)} ${(h - pad).toFixed(2)} L ${pad.toFixed(
+        2
+    )} ${(h - pad).toFixed(2)} Z`;
+
+    const last = points[points.length - 1];
+    const lastLabel = last ? `${last.date} • ${money(last.total)}` : "";
+
+    // simple grid lines (25/50/75%)
+    const gy = [0.25, 0.5, 0.75].map((t) => pad + (h - pad * 2) * t);
+
+    return (
+        <div className="hk-card hk-card-pad hk-subcard" style={{ padding: 12 }}>
+            <div className="hk-muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                {lastLabel || "Daily spend"}
+            </div>
+
+            <svg
+                viewBox={`0 0 ${w} ${h}`}
+                width="100%"
+                height={h}
+                role="img"
+                aria-label="Daily spend chart"
+                style={{
+                    display: "block",
+                    borderRadius: 12,
+                    background: "var(--hk-subcard-bg, rgba(2,6,23,0.02))",
+                }}
+            >
+                {gy.map((y, idx) => (
+                    // eslint-disable-next-line react/no-array-index-key
+                    <line
+                        key={idx}
+                        x1={pad}
+                        x2={w - pad}
+                        y1={y}
+                        y2={y}
+                        stroke="currentColor"
+                        opacity="0.08"
+                        strokeWidth="1"
+                    />
+                ))}
+
+                {safeMax > 0 ? (
+                    <path d={area} fill="currentColor" opacity="0.06" />
+                ) : null}
+
+                <path d={d} fill="none" stroke="currentColor" strokeWidth="3" opacity="0.65" strokeLinecap="round" />
+
+                {last ? (
+                    <>
+                        <circle cx={last.x} cy={last.y} r="5" fill="currentColor" opacity="0.8" />
+                    </>
+                ) : null}
+            </svg>
+
+            <div className="hk-muted" style={{ fontSize: 12, marginTop: 8, display: "flex", justifyContent: "space-between", gap: 12 }}>
+                <span>
+                    Min: <strong>{money(safeMin)}</strong>
+                </span>
+                <span>
+                    Max: <strong>{money(safeMax)}</strong>
+                </span>
+            </div>
+        </div>
+    );
 }
 
 export default function DashboardPage() {
@@ -50,91 +254,203 @@ export default function DashboardPage() {
 
     const [loading, setLoading] = useState(true);
     const [pageError, setPageError] = useState("");
-    const [data, setData] = useState(null);
 
-    const [remindersLoading, setRemindersLoading] = useState(true);
-    const [remindersError, setRemindersError] = useState("");
-    const [upcoming, setUpcoming] = useState([]);
-    const [reminderActionMsg, setReminderActionMsg] = useState("");
-    const [reminderBusyById, setReminderBusyById] = useState({});
+    const [windowDays, setWindowDays] = useState(30);
 
-    async function loadDashboard() {
-        const res = await api.dashboardSummary(token);
-        setData(res?.data || null);
-    }
+    const [summary, setSummary] = useState(null);
+    const [reminders, setReminders] = useState([]);
 
-    async function loadUpcomingReminders() {
-        setRemindersLoading(true);
-        setRemindersError("");
-        try {
-            const res = await api.upcomingReminders(token, { windowDays: 30 });
-            const list = res?.data?.reminders || [];
-            setUpcoming(Array.isArray(list) ? list : []);
-        } catch (err) {
-            setRemindersError(err?.message || "Failed to load reminders.");
-            setUpcoming([]);
-        } finally {
-            setRemindersLoading(false);
-        }
-    }
+    // Receipt counts preload
+    const [docCounts, setDocCounts] = useState({}); // key: `${propertyId}:${logId}` => number
 
-    async function load() {
+    // -------- receipts modal state --------
+    const [docsOpen, setDocsOpen] = useState(false);
+    const [docsBusy, setDocsBusy] = useState(false);
+    const [docsError, setDocsError] = useState("");
+    const [docs, setDocs] = useState([]);
+    const [docsTarget, setDocsTarget] = useState(null); // { propertyId, logId, title }
+
+    // upload to existing log
+    const uploadRef = useRef(null);
+    const [uploadBusy, setUploadBusy] = useState(false);
+    const [uploadMsg, setUploadMsg] = useState("");
+    const [uploadErr, setUploadErr] = useState("");
+
+    async function load(nextWindowDays = windowDays) {
         setLoading(true);
         setPageError("");
-        setReminderActionMsg("");
         try {
-            await Promise.all([loadDashboard(), loadUpcomingReminders()]);
+            const s = await api.dashboardSummary(token, nextWindowDays);
+            setSummary(pickDashboardData(s));
+
+            const r = await api.getUpcomingReminders(token);
+            const list = r?.data?.reminders || [];
+            setReminders(list);
+
+            // Preload receipt counts (limit concurrency so we don’t hammer the API)
+            const jobs = list
+                .map((rem) => {
+                    const propertyId = rem?.property?._id || rem?.property?.id || rem?.property;
+                    const logId = rem?._id;
+                    if (!propertyId || !logId) return null;
+                    return { propertyId, logId };
+                })
+                .filter(Boolean);
+
+            const nextCounts = {};
+            await runWithLimit(jobs, 5, async ({ propertyId, logId }) => {
+                try {
+                    const res = await api.listMaintenanceDocuments(propertyId, logId, token);
+                    const docsList = res?.data?.documents || [];
+                    nextCounts[`${propertyId}:${logId}`] = Array.isArray(docsList) ? docsList.length : 0;
+                } catch {
+                    // leave undefined if it fails; button will show “Show receipts”
+                }
+            });
+
+            setDocCounts(nextCounts);
         } catch (err) {
             setPageError(err?.message || "Failed to load dashboard.");
-            setData(null);
+            setSummary(null);
+            setReminders([]);
+            setDocCounts({});
         } finally {
             setLoading(false);
         }
     }
 
     useEffect(() => {
-        load();
+        load(30);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    const totals = data?.totals || {};
-    const recentLogs = Array.isArray(data?.recentLogs) ? data.recentLogs : [];
-    const byCategory = Array.isArray(data?.byCategory) ? data.byCategory : [];
-    const byProperty = Array.isArray(data?.byProperty) ? data.byProperty : [];
-    const topVendors = Array.isArray(data?.topVendors) ? data.topVendors : [];
-    const remindersSummary = data?.remindersSummary || {};
-    const dailySpend = Array.isArray(data?.dailySpend) ? data.dailySpend : [];
+    const totalUpcoming = useMemo(() => reminders.length, [reminders]);
 
-    const maxDailySpend = useMemo(() => {
-        if (!dailySpend.length) return 0;
-        return Math.max(...dailySpend.map((d) => Number(d?.total || 0)));
-    }, [dailySpend]);
+    const meta = summary?.meta || {};
+    const totals = summary?.totals || {};
+    const byCategory = Array.isArray(summary?.byCategory) ? summary.byCategory : [];
+    const topVendors = Array.isArray(summary?.topVendors) ? summary.topVendors : [];
+    const dailySpend = Array.isArray(summary?.dailySpend) ? summary.dailySpend : [];
+    const insights = summary?.insights || {};
 
-    async function handleSnooze(logId, days) {
-        setReminderActionMsg("");
-        setReminderBusyById((p) => ({ ...p, [logId]: true }));
+    const dailySeries = useMemo(() => buildDailySeries(meta.windowDays ?? windowDays, dailySpend), [meta.windowDays, windowDays, dailySpend]);
+
+    const windowSpendTotal = useMemo(() => dailySeries.reduce((sum, p) => sum + (p.total || 0), 0), [dailySeries]);
+    const windowAvgPerDay = useMemo(() => (dailySeries.length ? windowSpendTotal / dailySeries.length : 0), [dailySeries.length, windowSpendTotal]);
+
+    async function openDocsForLog(rem) {
+        setDocsTarget(null);
+        setDocs([]);
+        setDocsError("");
+        setUploadMsg("");
+        setUploadErr("");
+
+        const propertyId = rem?.property?._id || rem?.property?.id || rem?.property;
+        const logId = rem?._id;
+
+        if (!propertyId || !logId) {
+            setDocsError("Missing propertyId or logId on this reminder.");
+            setDocsOpen(true);
+            return;
+        }
+
+        setDocsTarget({ propertyId, logId, title: rem?.title || "Maintenance log" });
+        setDocsOpen(true);
+
+        setDocsBusy(true);
         try {
-            await api.snoozeReminder(logId, token, { days });
-            setReminderActionMsg(`Snoozed ${days} days ✅`);
-            await Promise.all([loadDashboard(), loadUpcomingReminders()]);
+            const res = await api.listMaintenanceDocuments(propertyId, logId, token);
+            const list = res?.data?.documents || [];
+            setDocs(Array.isArray(list) ? list : []);
+            setDocCounts((m) => ({ ...m, [`${propertyId}:${logId}`]: Array.isArray(list) ? list.length : 0 }));
         } catch (err) {
-            setReminderActionMsg(err?.message || "Snooze failed.");
+            setDocsError(err?.message || "Failed to load documents for this log.");
+            setDocs([]);
         } finally {
-            setReminderBusyById((p) => ({ ...p, [logId]: false }));
+            setDocsBusy(false);
         }
     }
 
-    async function handleComplete(logId) {
-        setReminderActionMsg("");
-        setReminderBusyById((p) => ({ ...p, [logId]: true }));
+    function closeDocs() {
+        if (docsBusy || uploadBusy) return;
+        setDocsOpen(false);
+        setDocs([]);
+        setDocsError("");
+        setDocsTarget(null);
+        setUploadMsg("");
+        setUploadErr("");
+        if (uploadRef.current) uploadRef.current.value = "";
+    }
+
+    async function handleDownload(docId) {
+        if (!docsTarget) return;
         try {
-            await api.completeReminder(logId, token);
-            setReminderActionMsg("Marked complete ✅");
-            await Promise.all([loadDashboard(), loadUpcomingReminders()]);
+            const { blob, filename } = await api.downloadMaintenanceDocument(docsTarget.propertyId, docsTarget.logId, docId, token);
+
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename || "document";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
         } catch (err) {
-            setReminderActionMsg(err?.message || "Complete failed.");
+            setDocsError(err?.message || "Download failed.");
+        }
+    }
+
+    async function handleDeleteDoc(docId) {
+        if (!docsTarget) return;
+        const ok = window.confirm("Delete this document? This cannot be undone.");
+        if (!ok) return;
+
+        try {
+            await api.deleteMaintenanceDocument(docsTarget.propertyId, docsTarget.logId, docId, token);
+            const res = await api.listMaintenanceDocuments(docsTarget.propertyId, docsTarget.logId, token);
+            const list = res?.data?.documents || [];
+            setDocs(list);
+
+            setDocCounts((m) => ({
+                ...m,
+                [`${docsTarget.propertyId}:${docsTarget.logId}`]: Array.isArray(list) ? list.length : 0,
+            }));
+        } catch (err) {
+            setDocsError(err?.message || "Delete failed.");
+        }
+    }
+
+    async function handleUploadToLog(file) {
+        if (!docsTarget) return;
+
+        setUploadBusy(true);
+        setUploadMsg("");
+        setUploadErr("");
+        setDocsError("");
+
+        try {
+            const up = await api.uploadReceipt(file, token);
+            const docId = up?.data?.document?._id || up?.data?.document?.id || up?.data?.documentId || null;
+
+            if (!docId) throw new Error("Upload succeeded but no documentId returned.");
+
+            await api.attachReceipt(docId, docsTarget.propertyId, docsTarget.logId, token);
+
+            setUploadMsg("Receipt uploaded + attached ✅");
+
+            const res = await api.listMaintenanceDocuments(docsTarget.propertyId, docsTarget.logId, token);
+            const list = res?.data?.documents || [];
+            setDocs(list);
+
+            setDocCounts((m) => ({
+                ...m,
+                [`${docsTarget.propertyId}:${docsTarget.logId}`]: Array.isArray(list) ? list.length : 0,
+            }));
+        } catch (err) {
+            setUploadErr(err?.message || "Upload failed.");
         } finally {
-            setReminderBusyById((p) => ({ ...p, [logId]: false }));
+            setUploadBusy(false);
+            if (uploadRef.current) uploadRef.current.value = "";
         }
     }
 
@@ -143,328 +459,161 @@ export default function DashboardPage() {
             <div className="hk-header">
                 <div>
                     <h2 className="hk-title">Dashboard</h2>
-                    <p className="hk-subtitle">
-                        A quick snapshot of spending, activity, and where costs are going.
-                    </p>
+                    <p className="hk-subtitle">Analytics + upcoming reminders</p>
                 </div>
 
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                    <button className="hk-btn" type="button" onClick={load} disabled={loading}>
-                        {loading ? "Refreshing…" : "Refresh"}
-                    </button>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <label className="hk-label" style={{ minWidth: 180 }}>
+                        Analytics window
+                        <select
+                            className="hk-input"
+                            value={windowDays}
+                            onChange={(e) => {
+                                const next = Number(e.target.value);
+                                setWindowDays(next);
+                                load(next);
+                            }}
+                            disabled={loading}
+                        >
+                            <option value={30}>Last 30 days</option>
+                            <option value={90}>Last 90 days</option>
+                            <option value={365}>Last 365 days</option>
+                        </select>
+                    </label>
+
                     <Link className="hk-link" to="/properties">
                         View properties →
                     </Link>
+
+                    <button className="hk-btn" type="button" onClick={() => load(windowDays)} disabled={loading}>
+                        {loading ? "Refreshing…" : "Refresh"}
+                    </button>
                 </div>
             </div>
 
-            {pageError && <div className="hk-error">{pageError}</div>}
+            {pageError ? <div className="hk-banner hk-banner-err">{pageError}</div> : null}
 
             {loading ? (
                 <div className="hk-muted">Loading…</div>
-            ) : !data ? (
-                <div className="hk-muted">No dashboard data yet.</div>
             ) : (
                 <>
-                    {/* Top cards */}
-                    <div className="hk-grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-                        <div className="hk-card hk-card-pad">
-                            <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>
-                                This month
-                            </div>
-                            <div style={{ fontSize: 26, fontWeight: 900 }}>{money(totals.month)}</div>
-                        </div>
-
-                        <div className="hk-card hk-card-pad">
-                            <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>
-                                This year
-                            </div>
-                            <div style={{ fontSize: 26, fontWeight: 900 }}>{money(totals.year)}</div>
-                        </div>
-
-                        <div className="hk-card hk-card-pad">
-                            <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>
-                                All time
-                            </div>
-                            <div style={{ fontSize: 26, fontWeight: 900 }}>{money(totals.allTime)}</div>
-                        </div>
-                    </div>
-
-                    {/* Property overview */}
-                    <div className="hk-card hk-card-pad" style={{ marginTop: 12 }}>
-                        <div className="hk-row" style={{ marginBottom: 10 }}>
+                    <div className="hk-card hk-card-pad" style={{ marginBottom: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                             <div>
-                                <div style={{ fontWeight: 900 }}>Property overview</div>
+                                <div style={{ fontWeight: 900, fontSize: 16 }}>Summary</div>
                                 <div className="hk-muted" style={{ fontSize: 13 }}>
-                                    Spend + activity by property
-                                </div>
-                            </div>
-                            <Link className="hk-link" to="/properties">
-                                Manage →
-                            </Link>
-                        </div>
-
-                        {!byProperty.length ? (
-                            <div className="hk-muted">No property stats yet.</div>
-                        ) : (
-                            <div className="hk-grid" style={{ gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
-                                {byProperty.map((p) => (
-                                    <div key={p.propertyId} className="hk-card hk-card-pad">
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "start" }}>
-                                            <div>
-                                                <div style={{ fontWeight: 900, fontSize: 16 }}>{p.nickname || "Property"}</div>
-                                                <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                    {p.city ? `${p.city}, ` : ""}
-                                                    {p.province || ""}
-                                                </div>
-                                            </div>
-
-                                            <span className="hk-pill" style={{ fontSize: 12 }}>
-                                                {Number(p.count || 0)} log{Number(p.count || 0) === 1 ? "" : "s"}
-                                            </span>
-                                        </div>
-
-                                        <div style={{ marginTop: 10, fontSize: 22, fontWeight: 900 }}>{money(p.total)}</div>
-
-                                        <div style={{ marginTop: 10 }}>
-                                            <Link className="hk-link" to={`/properties/${p.propertyId}/maintenance`}>
-                                                Open maintenance →
-                                            </Link>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Reminders + Daily spend */}
-                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
-                        <div className="hk-card hk-card-pad">
-                            <div className="hk-row" style={{ marginBottom: 8 }}>
-                                <div>
-                                    <div style={{ fontWeight: 900 }}>Reminders</div>
-                                    <div className="hk-muted" style={{ fontSize: 13 }}>
-                                        Window: {remindersSummary.windowDays || 30} days
-                                    </div>
-                                </div>
-                                <Link className="hk-link" to="/properties">
-                                    Go →
-                                </Link>
-                            </div>
-
-                            <div style={{ display: "flex", gap: 12 }}>
-                                <div className="hk-card hk-card-pad" style={{ flex: 1 }}>
-                                    <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>
-                                        Overdue
-                                    </div>
-                                    <div style={{ fontSize: 22, fontWeight: 900 }}>
-                                        {Number(remindersSummary.overdueCount || 0)}
-                                    </div>
-                                </div>
-
-                                <div className="hk-card hk-card-pad" style={{ flex: 1 }}>
-                                    <div className="hk-muted" style={{ fontSize: 13, fontWeight: 800 }}>
-                                        Upcoming
-                                    </div>
-                                    <div style={{ fontSize: 22, fontWeight: 900 }}>
-                                        {Number(remindersSummary.upcomingCount || 0)}
-                                    </div>
+                                    Properties: <strong>{meta.totalProperties ?? "—"}</strong> • Logs:{" "}
+                                    <strong>{meta.totalLogs ?? "—"}</strong>
                                 </div>
                             </div>
 
-                            {/* Upcoming reminders list */}
-                            <div style={{ marginTop: 12 }}>
-                                <div className="hk-row" style={{ marginBottom: 8 }}>
-                                    <div className="hk-muted" style={{ fontSize: 13, fontWeight: 900 }}>
-                                        Upcoming reminders
-                                    </div>
-                                    <button className="hk-btn" type="button" onClick={loadUpcomingReminders} disabled={remindersLoading}>
-                                        {remindersLoading ? "Loading…" : "Refresh"}
-                                    </button>
-                                </div>
-
-                                {reminderActionMsg && (
-                                    <div className={reminderActionMsg.includes("✅") ? "hk-muted" : "hk-error"} style={{ marginBottom: 10 }}>
-                                        {reminderActionMsg}
-                                    </div>
-                                )}
-
-                                {remindersError ? (
-                                    <div className="hk-error" style={{ fontSize: 13 }}>{remindersError}</div>
-                                ) : remindersLoading ? (
-                                    <div className="hk-muted">Loading reminders…</div>
-                                ) : upcoming.length === 0 ? (
-                                    <div className="hk-muted" style={{ fontSize: 13 }}>
-                                        No upcoming reminders yet. Add a <strong>Next due date</strong> on a maintenance log and keep reminders enabled.
-                                    </div>
-                                ) : (
-                                    <ul className="hk-list" style={{ marginTop: 0 }}>
-                                        {upcoming.slice(0, 6).map((r) => {
-                                            const busy = !!reminderBusyById[r._id];
-                                            const status = r.reminderStatus || "future";
-                                            const badgeText =
-                                                status === "overdue"
-                                                    ? `Overdue (${Math.abs(Number(r.dueInDays || 0))}d)`
-                                                    : status === "dueSoon"
-                                                        ? `Due soon (${Number(r.dueInDays || 0)}d)`
-                                                        : `Upcoming (${Number(r.dueInDays || 0)}d)`;
-
-                                            return (
-                                                <li key={r._id} style={{ marginBottom: 10 }}>
-                                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
-                                                        <div style={{ flex: 1 }}>
-                                                            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                                                                <div style={{ fontWeight: 900 }}>{r.title || "Reminder"}</div>
-                                                                <span style={reminderBadge(status, r.dueInDays)}>{badgeText}</span>
-                                                            </div>
-
-                                                            <div className="hk-muted" style={{ fontSize: 12, marginTop: 4 }}>
-                                                                {r.property?.nickname ? `${r.property.nickname} • ` : ""}
-                                                                {r.category ? `${r.category} • ` : ""}
-                                                                {r.vendor ? `${r.vendor} • ` : ""}
-                                                                Due: {r.nextDueDate ? safeDateLabel(r.nextDueDate) : "—"}
-                                                            </div>
-
-                                                            <div style={{ marginTop: 6 }}>
-                                                                {r.property?._id ? (
-                                                                    <Link className="hk-link" to={`/properties/${r.property._id}/maintenance`}>
-                                                                        Open maintenance →
-                                                                    </Link>
-                                                                ) : (
-                                                                    <span className="hk-muted" style={{ fontSize: 12 }}>
-                                                                        (Property link unavailable)
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-
-                                                        <div style={{ display: "flex", gap: 8 }}>
-                                                            <button
-                                                                type="button"
-                                                                className="hk-btn"
-                                                                disabled={busy}
-                                                                onClick={() => handleSnooze(r._id, 7)}
-                                                            >
-                                                                {busy ? "Working…" : "Snooze 7d"}
-                                                            </button>
-
-                                                            <button
-                                                                type="button"
-                                                                className="hk-btn"
-                                                                disabled={busy}
-                                                                onClick={() => handleComplete(r._id)}
-                                                            >
-                                                                {busy ? "Working…" : "Complete"}
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                </li>
-                                            );
-                                        })}
-                                    </ul>
-                                )}
+                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                <span className="hk-pill">This month: {money(totals.month ?? 0)}</span>
+                                <span className="hk-pill">This year: {money(totals.year ?? 0)}</span>
+                                <span className="hk-pill">All-time: {money(totals.allTime ?? 0)}</span>
                             </div>
                         </div>
 
-                        {/* Daily spend */}
-                        <div className="hk-card hk-card-pad">
-                            <div className="hk-row" style={{ marginBottom: 8 }}>
-                                <div>
-                                    <div style={{ fontWeight: 900 }}>Daily spend</div>
-                                    <div className="hk-muted" style={{ fontSize: 13 }}>
-                                        Last {dailySpend.length || 0} days
-                                    </div>
+                        <div className="hk-divider" />
+
+                        <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                            <div className="hk-card hk-card-pad">
+                                <div className="hk-muted" style={{ fontSize: 12 }}>
+                                    Smart insight
+                                </div>
+                                <div style={{ fontWeight: 900, marginTop: 6 }}>Top category this month</div>
+                                <div className="hk-muted" style={{ marginTop: 6 }}>
+                                    {insights?.topCategoryThisMonth?.category
+                                        ? `${insights.topCategoryThisMonth.category} • ${money(insights.topCategoryThisMonth.total || 0)}`
+                                        : "No spend recorded this month yet."}
                                 </div>
                             </div>
 
-                            {!dailySpend.length ? (
-                                <div className="hk-muted">No daily spend data.</div>
-                            ) : (
-                                <div style={{ display: "grid", gap: 6 }}>
-                                    {dailySpend.slice(-14).map((d) => {
-                                        const total = Number(d?.total || 0);
-                                        const pct = maxDailySpend > 0 ? Math.round((total / maxDailySpend) * 100) : 0;
-
-                                        return (
-                                            <div
-                                                key={d.date}
-                                                style={{
-                                                    display: "grid",
-                                                    gridTemplateColumns: "80px 1fr 90px",
-                                                    gap: 10,
-                                                    alignItems: "center",
-                                                }}
-                                            >
-                                                <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                    {getMonthNameFromISODate(d.date)}
-                                                </div>
-
-                                                <div style={{ height: 10, borderRadius: 999, background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
-                                                    <div style={{ height: "100%", width: `${pct}%`, borderRadius: 999, background: "rgba(255,255,255,0.45)" }} />
-                                                </div>
-
-                                                <div style={{ fontSize: 12, textAlign: "right" }}>{money(total)}</div>
-                                            </div>
-                                        );
-                                    })}
+                            <div className="hk-card hk-card-pad">
+                                <div className="hk-muted" style={{ fontSize: 12 }}>
+                                    Smart insight
                                 </div>
-                            )}
+                                <div style={{ fontWeight: 900, marginTop: 6 }}>Biggest log (last 30 days)</div>
+                                <div className="hk-muted" style={{ marginTop: 6 }}>
+                                    {insights?.biggestLogLast30Days
+                                        ? `${money(insights.biggestLogLast30Days.cost || 0)} • ${insights.biggestLogLast30Days.vendor || "—"} • ${safeDateLabel(
+                                            insights.biggestLogLast30Days.serviceDate
+                                        )}`
+                                        : "No logs in the last 30 days."}
+                                </div>
+                            </div>
                         </div>
                     </div>
 
-                    {/* Recent logs */}
-                    <div className="hk-card hk-card-pad" style={{ marginTop: 12 }}>
-                        <div className="hk-row" style={{ marginBottom: 10 }}>
+                    {/* ✅ NEW: Chart section */}
+                    <div className="hk-card hk-card-pad" style={{ marginBottom: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                             <div>
-                                <div style={{ fontWeight: 900 }}>Recent logs</div>
+                                <div style={{ fontWeight: 900, fontSize: 16 }}>Daily spend trend</div>
                                 <div className="hk-muted" style={{ fontSize: 13 }}>
-                                    Latest activity across your properties
+                                    Last {meta.windowDays ?? windowDays} days • Total: <strong>{money(windowSpendTotal)}</strong> • Avg/day:{" "}
+                                    <strong>{money(windowAvgPerDay)}</strong>
                                 </div>
                             </div>
-                            <Link className="hk-link" to="/properties">
-                                View all →
-                            </Link>
+
+                            <button
+                                className="hk-btn hk-btn-ghost hk-btn-sm"
+                                type="button"
+                                onClick={() =>
+                                    exportCSV(
+                                        `homekeep_daily_spend_${meta.windowDays ?? windowDays}d.csv`,
+                                        dailySeries.map((x) => ({ date: x.date, total: x.total }))
+                                    )
+                                }
+                                disabled={!dailySeries.length}
+                            >
+                                Export CSV
+                            </button>
                         </div>
 
-                        {recentLogs.length === 0 ? (
-                            <div className="hk-muted">No logs yet.</div>
-                        ) : (
-                            <ul className="hk-list" style={{ marginTop: 0 }}>
-                                {recentLogs.slice(0, 8).map((log) => (
-                                    <li key={log._id} style={{ marginBottom: 10 }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                                            <div>
-                                                <div style={{ fontWeight: 900 }}>{log.title}</div>
-                                                <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                    {log.property?.nickname ? `${log.property.nickname} • ` : ""}
-                                                    {log.category ? `${log.category} • ` : ""}
-                                                    {log.vendor ? `${log.vendor} • ` : ""}
-                                                    {log.serviceDate ? safeDateLabel(log.serviceDate) : ""}
-                                                </div>
-                                            </div>
-                                            <div style={{ fontWeight: 900 }}>{money(log.cost)}</div>
-                                        </div>
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
+                        <div className="hk-divider" />
+
+                        <Sparkline data={dailySeries} height={150} />
                     </div>
 
-                    {/* Category + Vendors */}
-                    <div className="hk-grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+                    <div className="hk-grid" style={{ marginBottom: 12 }}>
                         <div className="hk-card hk-card-pad">
-                            <div style={{ fontWeight: 900, marginBottom: 10 }}>Spend by category</div>
-                            {!byCategory.length ? (
-                                <div className="hk-muted">No category breakdown yet.</div>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                                <div>
+                                    <div style={{ fontWeight: 900 }}>Top categories (window)</div>
+                                    <div className="hk-muted" style={{ fontSize: 13 }}>
+                                        Based on last {meta.windowDays ?? windowDays} days
+                                    </div>
+                                </div>
+
+                                <button
+                                    className="hk-btn hk-btn-ghost hk-btn-sm"
+                                    type="button"
+                                    onClick={() =>
+                                        exportCSV(
+                                            `homekeep_by_category_${meta.windowDays ?? windowDays}d.csv`,
+                                            byCategory.map((x) => ({ category: x.category, total: x.total, count: x.count }))
+                                        )
+                                    }
+                                    disabled={!byCategory.length}
+                                >
+                                    Export CSV
+                                </button>
+                            </div>
+
+                            <div className="hk-divider" />
+
+                            {byCategory.length === 0 ? (
+                                <div className="hk-muted">No category data yet.</div>
                             ) : (
                                 <ul className="hk-list" style={{ marginTop: 0 }}>
                                     {byCategory.map((c) => (
-                                        <li key={c.category} style={{ marginBottom: 10 }}>
-                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                        <li key={c.category}>
+                                            <div className="hk-stat">
                                                 <div>
-                                                    <div style={{ fontWeight: 900 }}>{c.category || "Uncategorized"}</div>
+                                                    <div style={{ fontWeight: 900 }}>{c.category}</div>
                                                     <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                        {Number(c.count || 0)} log{Number(c.count || 0) === 1 ? "" : "s"}
+                                                        {c.count} log(s)
                                                     </div>
                                                 </div>
                                                 <div style={{ fontWeight: 900 }}>{money(c.total)}</div>
@@ -476,18 +625,42 @@ export default function DashboardPage() {
                         </div>
 
                         <div className="hk-card hk-card-pad">
-                            <div style={{ fontWeight: 900, marginBottom: 10 }}>Top vendors</div>
-                            {!topVendors.length ? (
-                                <div className="hk-muted">No vendor stats yet.</div>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                                <div>
+                                    <div style={{ fontWeight: 900 }}>Top vendors (window)</div>
+                                    <div className="hk-muted" style={{ fontSize: 13 }}>
+                                        Based on last {meta.windowDays ?? windowDays} days
+                                    </div>
+                                </div>
+
+                                <button
+                                    className="hk-btn hk-btn-ghost hk-btn-sm"
+                                    type="button"
+                                    onClick={() =>
+                                        exportCSV(
+                                            `homekeep_top_vendors_${meta.windowDays ?? windowDays}d.csv`,
+                                            topVendors.map((x) => ({ vendor: x.vendor, total: x.total, count: x.count }))
+                                        )
+                                    }
+                                    disabled={!topVendors.length}
+                                >
+                                    Export CSV
+                                </button>
+                            </div>
+
+                            <div className="hk-divider" />
+
+                            {topVendors.length === 0 ? (
+                                <div className="hk-muted">No vendor data yet.</div>
                             ) : (
                                 <ul className="hk-list" style={{ marginTop: 0 }}>
                                     {topVendors.map((v) => (
-                                        <li key={v.vendor} style={{ marginBottom: 10 }}>
-                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                        <li key={v.vendor}>
+                                            <div className="hk-stat">
                                                 <div>
-                                                    <div style={{ fontWeight: 900 }}>{v.vendor || "Unknown"}</div>
+                                                    <div style={{ fontWeight: 900 }}>{v.vendor}</div>
                                                     <div className="hk-muted" style={{ fontSize: 12 }}>
-                                                        {Number(v.count || 0)} log{Number(v.count || 0) === 1 ? "" : "s"}
+                                                        {v.count} log(s)
                                                     </div>
                                                 </div>
                                                 <div style={{ fontWeight: 900 }}>{money(v.total)}</div>
@@ -498,6 +671,131 @@ export default function DashboardPage() {
                             )}
                         </div>
                     </div>
+
+                    <div className="hk-card hk-card-pad">
+                        <div className="hk-row" style={{ marginBottom: 10, display: "flex", justifyContent: "space-between", gap: 12 }}>
+                            <div>
+                                <div style={{ fontWeight: 900, fontSize: 16 }}>Upcoming reminders</div>
+                                <div className="hk-muted" style={{ fontSize: 13 }}>
+                                    “Show receipts” displays the real count (preloaded).
+                                </div>
+                            </div>
+                            <span className="hk-pill">Reminders</span>
+                        </div>
+
+                        {reminders.length === 0 ? (
+                            <div className="hk-muted">No reminders found.</div>
+                        ) : (
+                            <ul className="hk-list" style={{ marginTop: 0 }}>
+                                {reminders.map((r) => {
+                                    const propName = r?.property?.nickname || r?.property?.city || "Property";
+                                    const propertyId = r?.property?._id || r?.property?.id || r?.property;
+                                    const logId = r?._id;
+                                    const key = propertyId && logId ? `${propertyId}:${logId}` : "";
+                                    const count = key ? docCounts[key] : undefined;
+
+                                    const label = typeof count === "number" ? `Show receipts (${count})` : "Show receipts";
+
+                                    return (
+                                        <li key={r._id} style={{ marginBottom: 12 }}>
+                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 900 }}>{r.title}</div>
+                                                    <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                        {propName}
+                                                        {r.nextDueDate ? ` • Due: ${safeDateLabel(r.nextDueDate)}` : ""}
+                                                        {typeof r.dueInDays === "number" ? ` • In ${r.dueInDays} day(s)` : ""}
+                                                    </div>
+                                                </div>
+
+                                                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                                    <Link className="hk-link" to={`/properties/${propertyId}/maintenance`}>
+                                                        Open log →
+                                                    </Link>
+                                                    <button className="hk-btn" type="button" onClick={() => openDocsForLog(r)}>
+                                                        {label}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+                    </div>
+
+                    <Modal open={docsOpen} title="Receipts / Documents" onClose={closeDocs}>
+                        {docsTarget ? (
+                            <div className="hk-muted" style={{ fontSize: 13, marginBottom: 10 }}>
+                                Log: <strong>{docsTarget.title}</strong>
+                            </div>
+                        ) : null}
+
+                        {docsError ? (
+                            <div className="hk-banner hk-banner-err" style={{ marginBottom: 10 }}>
+                                {docsError}
+                            </div>
+                        ) : null}
+                        {uploadErr ? (
+                            <div className="hk-banner hk-banner-err" style={{ marginBottom: 10 }}>
+                                {uploadErr}
+                            </div>
+                        ) : null}
+                        {uploadMsg ? <div className="hk-banner hk-banner-ok" style={{ marginBottom: 10 }}>{uploadMsg}</div> : null}
+
+                        {docsTarget ? (
+                            <div className="hk-card hk-card-pad" style={{ marginBottom: 12 }}>
+                                <div style={{ fontWeight: 900, marginBottom: 6 }}>Upload receipt to this log</div>
+                                <div className="hk-muted" style={{ fontSize: 13, marginBottom: 10 }}>
+                                    This will upload the file, then attach it to this maintenance log.
+                                </div>
+
+                                <input
+                                    ref={uploadRef}
+                                    type="file"
+                                    accept="application/pdf,image/*"
+                                    disabled={uploadBusy}
+                                    onChange={(e) => {
+                                        const f = e.target.files?.[0];
+                                        if (!f) return;
+                                        handleUploadToLog(f);
+                                    }}
+                                />
+                                {uploadBusy ? <div className="hk-muted" style={{ marginTop: 8 }}>Uploading…</div> : null}
+                            </div>
+                        ) : null}
+
+                        {docsBusy ? (
+                            <div className="hk-muted">Loading documents…</div>
+                        ) : docs.length === 0 ? (
+                            <div className="hk-muted">No receipts/documents attached to this log yet.</div>
+                        ) : (
+                            <ul className="hk-list" style={{ marginTop: 0 }}>
+                                {docs.map((d) => (
+                                    <li key={d._id} style={{ marginBottom: 10 }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                                            <div>
+                                                <div style={{ fontWeight: 900 }}>{d.originalName || "Document"}</div>
+                                                <div className="hk-muted" style={{ fontSize: 12 }}>
+                                                    {d.createdAt ? `Uploaded: ${safeDateLabel(d.createdAt)}` : ""}
+                                                    {d.size ? ` • ${Math.round(d.size / 1024)} KB` : ""}
+                                                </div>
+                                            </div>
+
+                                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                                <button className="hk-btn" type="button" onClick={() => handleDownload(d._id)}>
+                                                    Download / Show
+                                                </button>
+                                                <button className="hk-btn hk-btn-ghost" type="button" onClick={() => handleDeleteDoc(d._id)}>
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </Modal>
                 </>
             )}
         </div>

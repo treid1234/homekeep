@@ -1,63 +1,102 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { api } from "../services/api";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
+
+const HK_AUTH_NOTICE_KEY = "hk_auth_notice";
 
 export default function LoginPage() {
     const navigate = useNavigate();
-    const { setSession } = useAuth();
+    const location = useLocation();
+    const { isAuthed, login } = useAuth();
 
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
 
-    const [busy, setBusy] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
+    const [notice, setNotice] = useState("");
+
+    const nextPath = useMemo(() => {
+        const from = location.state?.from;
+        return typeof from === "string" && from.trim() ? from : "/dashboard";
+    }, [location.state]);
+
+    // If already authed, bounce
+    useEffect(() => {
+        if (isAuthed) navigate("/dashboard", { replace: true });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isAuthed]);
+
+    // Pull session-expired notice (set by AuthContext auto-logout)
+    useEffect(() => {
+        try {
+            const msg = sessionStorage.getItem(HK_AUTH_NOTICE_KEY) || "";
+            if (msg) {
+                setNotice(msg);
+                sessionStorage.removeItem(HK_AUTH_NOTICE_KEY);
+            }
+        } catch {
+            // no-op
+        }
+    }, []);
 
     async function handleSubmit(e) {
-        e.preventDefault(); // ✅ prevents page refresh
+        e.preventDefault();
         setError("");
 
-        const eTrim = email.trim();
-        if (!eTrim || !password) {
+        const cleanEmail = email.trim();
+        const cleanPassword = password;
+
+        if (!cleanEmail || !cleanPassword) {
             setError("Email and password are required.");
             return;
         }
 
-        setBusy(true);
+        setSubmitting(true);
         try {
-            const { user, token } = await api.login(eTrim, password);
+            await login(cleanEmail, cleanPassword);
 
-            // ✅ Store session in context/localStorage (see AuthContext below)
-            setSession({ user, token });
-
-            // ✅ Navigate somewhere after login
-            navigate("/dashboard");
+            // AuthProvider currently navigates to /dashboard; we override with “return to” after login.
+            // Using replace avoids back button going to /login.
+            navigate(nextPath, { replace: true });
         } catch (err) {
-            // ✅ Do NOT clear the fields on error
             setError(err?.message || "Login failed.");
         } finally {
-            setBusy(false);
+            setSubmitting(false);
         }
     }
 
     return (
         <div className="hk-container" style={{ maxWidth: 520 }}>
-            <div className="hk-header">
-                <div>
-                    <h2 className="hk-title">Log in</h2>
-                    <p className="hk-subtitle">Welcome back to HomeKeep.</p>
-                </div>
-            </div>
+            <div className="hk-card hk-card-pad">
+                <h2 className="hk-title" style={{ marginBottom: 6 }}>
+                    Log in
+                </h2>
+                <p className="hk-muted" style={{ marginTop: 0, marginBottom: 16 }}>
+                    Enter your credentials to access HomeKeep.
+                </p>
 
-            <section className="hk-card hk-card-pad">
-                <form onSubmit={handleSubmit} className="hk-form">
+                {notice ? (
+                    <div className="hk-banner" style={{ marginBottom: 12 }}>
+                        {notice}
+                    </div>
+                ) : null}
+
+                {error ? (
+                    <div className="hk-error" style={{ marginBottom: 12 }}>
+                        {error}
+                    </div>
+                ) : null}
+
+                <form className="hk-form" onSubmit={handleSubmit}>
                     <label className="hk-label">
                         Email
                         <input
                             className="hk-input"
-                            autoComplete="email"
+                            type="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
+                            autoComplete="email"
                             placeholder="you@example.com"
                         />
                     </label>
@@ -67,26 +106,27 @@ export default function LoginPage() {
                         <input
                             className="hk-input"
                             type="password"
-                            autoComplete="current-password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            placeholder="Your password"
+                            autoComplete="current-password"
+                            placeholder="••••••••"
                         />
                     </label>
 
-                    {error ? <div className="hk-error">{error}</div> : null}
-
-                    <div className="hk-actions" style={{ justifyContent: "space-between" }}>
-                        <button className="hk-btn" type="submit" disabled={busy}>
-                            {busy ? "Logging in…" : "Log in"}
+                    <div className="hk-actions" style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                        <button className="hk-btn" type="submit" disabled={submitting}>
+                            {submitting ? "Signing in…" : "Log in"}
                         </button>
-
-                        <Link className="hk-link" to="/register">
-                            Need an account? Register →
-                        </Link>
                     </div>
                 </form>
-            </section>
+
+                <div className="hk-muted" style={{ marginTop: 14, fontSize: 13 }}>
+                    Don’t have an account?{" "}
+                    <Link className="hk-link" to="/register" state={{ from: nextPath }}>
+                        Create one
+                    </Link>
+                </div>
+            </div>
         </div>
     );
 }
