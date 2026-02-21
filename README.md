@@ -2,91 +2,231 @@ HomeKeep
 
 Property & Home Maintenance Tracker
 
-HomeKeep is a full-stack web application designed to help homeowners track property details, maintenance history, and ongoing home expenses in one centralized place. The project was inspired by my experience as a new homeowner needing a better way to organize maintenance records, receipts, and costs over time.
+HomeKeep is a full-stack web application designed to help homeowners organize property information, track maintenance history, and monitor long-term home expenses in one centralized platform.
 
-This application is being developed as a capstone project and focuses on real-world functionality, clean architecture, and secure data handling.
+The project was inspired by my experience as a new homeowner needing a reliable system to manage receipts, service records, and maintenance costs over time.
 
+Developed as a capstone project, HomeKeep emphasizes:
 
-Features Implemented So Far
-Authentication & Security
+Clean architecture
+
+Secure authentication & data isolation
+
+Modular backend design
+
+Integration testing
+
+Real-world problem solving
+
+🌐 Live Application
+
+Frontend: (Insert deployed frontend URL here)
+API: (Insert deployed API URL here)
+
+📌 Project Overview
+
+HomeKeep allows authenticated users to:
+
+Create and manage multiple properties
+
+Track maintenance activities per property
+
+View historical spending trends
+
+Monitor monthly and yearly maintenance totals
+
+Access their data securely through JWT authentication
+
+Each user’s data is fully isolated and securely scoped to their account.
+
+✨ Core Features
+🔐 Authentication & Security
 
 User registration and login
 
 JWT-based authentication
 
-Protected API routes and frontend pages
+Protected API routes
 
-User-scoped data access (users can only see their own data)
+Protected frontend routes
 
-Properties
+User-scoped data access (multi-tenant safe design)
 
-Create and view property profiles
+Environment variable configuration for secrets
 
-Store address details, purchase date, and notes
+🏡 Property Management
+
+Create property profiles
+
+Store:
+
+Address
+
+Purchase date
+
+Notes
 
 Each property is securely linked to its owner
 
-Maintenance Tracking
+🛠 Maintenance Tracking
 
 Add maintenance records per property
 
-Track service date, category, cost, vendor, and notes
+Track:
 
-View maintenance history by property
+Service date
 
-Dashboard
+Category
 
-Monthly and yearly maintenance spending totals
+Cost
 
-Recent maintenance activity across all properties
+Vendor
 
-Custom sparkline chart showing daily spending trends over the last 30 days (implemented with SVG, no charting libraries)
+Notes
 
+View maintenance history per property
 
-Tech Stack
-Frontend
+Auth-protected CRUD endpoints
 
-React (Vite)
+📊 Dashboard & Analytics
 
-React Router
+Monthly maintenance spending total
 
-Context API for authentication state
+Yearly maintenance spending total
 
-Plain CSS / inline styles for UI
+Recent maintenance activity list
 
-Backend
+Custom sparkline visualization (built using SVG — no external charting libraries)
 
-Node.js
+Backend aggregation logic using MongoDB
 
-Express
+🧠 Architecture Overview
 
-MongoDB (Atlas)
+HomeKeep follows industry-standard full-stack architecture principles.
 
-Mongoose
+Backend Architecture (Node + Express + MongoDB)
+src/
+ ├── routes/
+ ├── controllers/
+ ├── models/
+ ├── middleware/
+ ├── config/
+ ├── utils/
+Design Principles Applied
 
-JWT authentication
+Separation of concerns
 
-
-Architecture Overview
+Modular route/controller structure
 
 RESTful API design
 
-Clear separation of concerns:
+Middleware-driven authentication
 
-Routes
+Centralized error handling
 
-Controllers
+Stateless JWT authentication
 
-Models
+Data aggregation handled server-side
 
-Middleware
+Frontend Architecture (React + Vite)
 
-Client and server communicate via JSON APIs
+React Router for client-side routing
 
-Aggregation logic handled on the backend for dashboard summaries
+Context API for authentication state
 
+Protected route components
 
-Getting Started (Local Development)
+API abstraction layer
+
+Component-based UI structure
+
+State-driven rendering
+
+Data Flow
+
+Frontend → API Service Layer → Express Routes → Controllers → Mongoose Models → MongoDB
+Response returned as structured JSON.
+
+🧪 Testing & Debugging
+
+HomeKeep includes automated integration tests for the backend API.
+
+Testing Frameworks Used
+
+Jest
+
+Supertest
+
+mongodb-memory-server (in-memory MongoDB instance)
+
+This approach ensures:
+
+Tests run independently of production databases
+
+Authentication and middleware are fully exercised
+
+Core data flows are validated end-to-end
+
+What Is Covered
+
+User registration
+
+User login
+
+Protected route access (/api/v1/me)
+
+Property creation (auth required)
+
+Property listing (auth required)
+
+Running API Tests
+cd homekeep-api
+npm install
+npm test
+
+Tests validate:
+
+Authentication logic
+
+JWT middleware enforcement
+
+CRUD functionality
+
+Response structure
+
+Data isolation
+
+🚀 Deployment
+
+HomeKeep is deployed using a modern cloud-based architecture:
+
+Frontend:
+
+Deployed via Vercel / Netlify (CDN optimized)
+
+Backend:
+
+Deployed via Render / Railway
+
+Database:
+
+MongoDB Atlas (managed cloud database)
+
+Deployment Considerations
+
+Environment variables securely configured
+
+MongoDB Atlas connection string secured
+
+JWT secrets not committed to source control
+
+CORS configured appropriately
+
+Stateless API design for scalability
+
+Production build optimization (Vite)
+
+🔧 Getting Started (Local Development)
 Prerequisites
 
 Node.js (v18+ recommended)
@@ -98,7 +238,6 @@ cd homekeep-api
 npm install
 npm run dev
 
-
 Create a .env file:
 
 PORT=5050
@@ -106,56 +245,88 @@ MONGO_URI=your_mongodb_connection_string
 JWT_SECRET=your_secret_key
 JWT_EXPIRES_IN=7d
 
+Backend runs at:
+
+http://localhost:5050
 Frontend Setup
 cd homekeep-client
 npm install
 npm run dev
 
+Frontend runs at:
 
-Frontend runs on:
-
-http://localhost:5173 (or next available port)
-
-
-Backend runs on:
-
-http://localhost:5050
-
-
-API Health Check
-GET /api/v1/health
-
-
-
-Returns a success response when the API is running correctly.
-
+http://localhost:5173
 📓 Development Log
 
-Weekly devlogs are maintained to document:
+Weekly devlogs document:
 
-Progress made
+Progress milestones
 
-Challenges encountered
+Architectural decisions
 
-Technical decisions and reasoning
+Debugging process
 
-Key learnings throughout the project
+Challenges and solutions
 
+Key learnings from real-world implementation
 
-Planned Enhancements
+Notable debugging milestones include:
 
-Document uploads (receipts, invoices, warranties)
+Resolving Jest test discovery issues
 
-Scanning documents for key data (amounts, dates, vendors)
+Ensuring JWT middleware correctly blocks unauthorized access
 
-User-editable overrides for scanned data
+Structuring integration tests with in-memory MongoDB
 
-Maintenance reminders and notifications
+Verifying protected CRUD endpoints through automated tests
 
-Improved dashboard insights
+📈 Planned Enhancements
 
+Document upload support (receipts, warranties)
 
-Author
+OCR-based receipt scanning
+
+Editable parsed data overrides
+
+Maintenance reminders & notifications
+
+Role-based access
+
+CI pipeline for automated testing
+
+Cloud file storage integration
+
+Error monitoring integration
+
+🛡 Security Considerations
+
+JWT-based authentication
+
+Protected routes (frontend + backend)
+
+User-scoped MongoDB queries
+
+Environment variable usage
+
+No secrets committed to repository
+
+Stateless session design
+
+🏗 Future Scalability
+
+Stateless API supports horizontal scaling
+
+MongoDB Atlas supports auto-scaling
+
+Aggregation logic centralized for performance
+
+Client-side caching improvements planned
+
+👩‍💻 Author
 
 Tamara Reid
 Capstone Project – Software Development Bootcamp
+
+📜 License
+
+This project is developed for educational purposes as part of a software development bootcamp capstone.
